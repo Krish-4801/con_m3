@@ -1,5 +1,6 @@
 import logging
 import json
+import numpy as np
 from typing import List, Dict, Any, Optional
 from qdrant_client import models
 from conclave.core.schemas import (
@@ -133,6 +134,88 @@ class ConclaveEngine:
         # 5. Atomic Batch Vector Upsert
         self.vector_store.upsert_batch(self.collections["text"], qdrant_points)
         logger.info(f"Successfully ingested {len(qdrant_points)} new memories.")
+
+    def add_memories_m3_style(self, memories: List[MemoryNode]):
+        """
+        M3-Agent Logic: Graph Reinforcement vs Creation.
+        If a semantic memory is very similar to an existing one, reinforce its weight instead of adding a duplicate.
+        """
+        if not memories:
+            return
+
+        for mem in memories:
+            # Ensure embedding
+            if not mem.embedding:
+                mem.embedding = self.embedding_service.get_embeddings_batched([mem.content])[0]
+
+            # Only apply reinforcement for semantic memories
+            if mem.mem_type == MemoryType.SEMANTIC:
+                hits = self.vector_store.search(
+                    self.collections["text"],
+                    mem.embedding,
+                    {"video_id": self.video_id, "type": "semantic"},
+                    limit=1,
+                )
+
+                if hits and len(hits) > 0 and hits[0].score > 0.85:
+                    existing_id = hits[0].id
+                    logger.info(f"Reinforcing existing memory {existing_id} instead of creating new.")
+                    query = "MATCH (m:Memory {id: $id}) SET m.weight = coalesce(m.weight, 1) + 1"
+                    self.graph_store.execute_async(query, {"id": existing_id})
+                    continue
+
+            # Fallback: standard ingestion
+            self.add_memory(mem)
+
+    def ingest_m3_data(self, memory_data: Dict[str, Any]):
+        """
+        Main entry point for M3 data ingestion.
+        """
+        # 1. Handle Equivalences (Merge Entities)
+        # This handles the "Equivalence: <face_1>, <voice_2>" logic
+        # You'll need to call your IdentityManager here via main.py usually, 
+        # or pass the strings back up. For now, we assume the strings are passed up.
+        # (Left as a no-op placeholder for integration with IdentityManager.)
+        eqs = memory_data.get("equivalences", [])
+        if eqs:
+            logger.info(f"Processing {len(eqs)} equivalence statements")
+
+        # 2. Ingest Episodic (Always new, time-bound)
+        self.add_memories_batched(memory_data.get('episodic', []))
+
+        # 3. Ingest Semantic (Reinforcement Logic)
+        self._ingest_semantic_weighted(memory_data.get('semantic', []))
+
+    def _ingest_semantic_weighted(self, memories: List[MemoryNode]):
+        """
+        M3-Agent 'process_memories' logic with Graph Reinforcement.
+        """
+        POSITIVE_THRESHOLD = 0.85
+        
+        for mem in memories:
+            # Embed content
+            embedding = self.embedding_service.get_embeddings_batched([mem.content])[0]
+
+            # Search for similar existing thoughts
+            hits = self.vector_store.search(
+                self.collections["text"], 
+                embedding, 
+                filter_kv={"video_id": self.video_id, "type": "semantic"},
+                limit=1
+            )
+
+            if hits and hits[0].score > POSITIVE_THRESHOLD:
+                existing_id = hits[0].id
+                logger.info(f"♻️ Reinforcing Memory {existing_id} (Score: {hits[0].score:.3f})")
+                
+                # M3 Logic: Increase edge weight in Neo4j
+                # We assume the graph store has a 'reinforce_node' method (see Step 4)
+                self.graph_store.reinforce_node(existing_id, delta=1.0)
+                
+            else:
+                # New thought -> Add to Vector + Graph
+                mem.embedding = embedding
+                self.add_memory(mem) # Uses the base add_memory logic
 
     def get_hybrid_context(self, query_vector: List[float], top_k: int = 5):
         """Perform Vector search then expand context via Graph."""

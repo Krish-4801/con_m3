@@ -5,6 +5,11 @@ import logging
 import argparse
 from typing import List, Dict, Any
 import openai
+from conclave.agent.m3_prompts import (
+    prompt_generate_plan,
+    prompt_generate_action_with_plan,
+    prompt_generate_action_with_plan_multiple_queries,
+)
 
 # Dynamic path handling
 import os
@@ -23,6 +28,7 @@ if parent_dir not in sys.path:
 
 from conclave.core.engine import ConclaveEngine
 from conclave.core.embedding_service import EmbeddingService
+import ast
 
 # Configure logging to be clean for CLI output
 logging.basicConfig(level=logging.ERROR) 
@@ -98,6 +104,166 @@ class ConclaveQuerier:
             })
             
         return context_results
+
+    def iterative_reasoning_loop(self, query: str, max_steps: int = 5):
+        """
+        M3-Agent Logic: Search -> Reason -> Answer Loop
+        """
+        current_knowledge = []
+        history = []
+
+        system_prompt = """
+You are an intelligent agent answering questions about a long video.
+You have a memory bank you can search.
+
+Process:
+1. Analyze the user question and current knowledge.
+2. Decide if you have enough info to answer.
+3. If NO: Output "Action: [Search] <query>"
+4. If YES: Output "Action: [Answer] <final_answer>"
+
+Constraint: Use specific entity IDs (e.g., face_1, voice_2) in searches if known.
+"""
+
+        for step in range(max_steps):
+            context_str = "\n".join([f"KB Item: {k}" for k in current_knowledge])
+            prompt = f"Question: {query}\n\nRetrieved Knowledge:\n{context_str}\n\nHistory:\n{history}\n\nWhat is your next action?"
+
+            try:
+                response = self.client.chat.completions.create(
+                    model=self.model,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": prompt},
+                    ],
+                )
+
+                content = response.choices[0].message.content
+                history.append(content)
+                print(f"Step {step+1}: {content}")
+
+                if "[Answer]" in content:
+                    final_ans = content.split("[Answer]", 1)[1].strip()
+                    print(f"✅ Final Answer: {final_ans}")
+                    return final_ans
+
+                elif "[Search]" in content:
+                    search_q = content.split("[Search]", 1)[1].strip()
+                    vec = self.embedder.get_embeddings_batched([search_q])[0]
+                    hits = self.engine.vector_store.search(self.engine.collections["text"], vec, {"video_id": self.video_id}, limit=3)
+                    new_info = [h.payload.get('content') for h in hits if h.payload]
+                    current_knowledge.extend(new_info)
+
+                else:
+                    print("⚠️ Unrecognized action, performing default search.")
+                    vec = self.embedder.get_embeddings_batched([query])[0]
+                    hits = self.engine.vector_store.search(self.engine.collections["text"], vec, {"video_id": self.video_id}, limit=3)
+                    new_info = [h.payload.get('content') for h in hits if h.payload]
+                    current_knowledge.extend(new_info)
+
+            except Exception as e:
+                print(f"LLM decision error: {e}")
+
+        print("❌ Max steps reached.")
+        return None
+
+    def execute_m3_control_loop(self, question: str):
+        """
+        The M3-Agent Controller Logic.
+        1. Generate Plan
+        2. Iterative Loop (Search <-> Reason)
+        3. Final Answer
+        """
+        print(f"❓ Question: {question}")
+
+        # --- STEP 1: Generate Retrieval Plan ---
+        plan_messages = [
+            {"role": "system", "content": prompt_generate_plan.format(question=question)}
+        ]
+        plan_resp = self.client.chat.completions.create(
+            model=self.model, messages=plan_messages
+        )
+        retrieval_plan = plan_resp.choices[0].message.content
+        print(f"📋 Plan: {retrieval_plan}")
+
+        # --- STEP 2: The Control Loop ---
+        knowledge_context = [] # List of strings
+        max_steps = 5
+        
+        for step in range(max_steps):
+            # Prepare context for the "Thinker"
+            # We construct the prompt dynamically based on collected knowledge
+            knowledge_str = json.dumps(knowledge_context, indent=2)
+            
+            # Select prompt: If it's the first step, simple plan. 
+            # If previous steps failed, M3 implies using _multiple_queries or _new_direction.
+            # We'll use the robust _multiple_queries prompt for general cases.
+            prompt_template = prompt_generate_action_with_plan_multiple_queries
+            
+            user_content = prompt_template.format(
+                question=question,
+                retrieval_plan=retrieval_plan,
+                knowledge=knowledge_str
+            )
+
+            # Call LLM
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[{"role": "user", "content": user_content}]
+            )
+            raw_output = response.choices[0].message.content
+
+            # --- STEP 3: Parse Action ---
+            if "[ANSWER]" in raw_output:
+                # Extraction logic
+                final_answer = raw_output.split("[ANSWER]")[1].strip()
+                print(f"✅ Final Answer: {final_answer}")
+                return final_answer
+            
+            elif "[SEARCH]" in raw_output:
+                # Extraction logic for queries
+                # M3 often outputs: [SEARCH] ["query1", "query2"]
+                try:
+                    search_part = raw_output.split("[SEARCH]")[1].strip()
+                    # Safe eval to parse python list string
+                    queries = ast.literal_eval(search_part)
+                    if isinstance(queries, str): queries = [queries] # Handle single query case
+                except:
+                    # Fallback if LLM outputs plain text
+                    queries = [raw_output.split("[SEARCH]")[1].strip()]
+
+                print(f"🔍 Step {step+1} Searching: {queries}")
+
+                # Execute Searches
+                new_info = []
+                for q in queries:
+                    # Handle "CLIP_x" queries (M3 Logic)
+                    if "CLIP_" in q:
+                         # Extraction of clip ID logic would go here
+                         # For now, treat as vector search
+                         pass
+                    
+                    # Vector Search
+                    q_vec = self.embedder.get_embeddings_batched([q])[0]
+                    hits = self.engine.vector_store.search("text_memories", q_vec, {"video_id": self.video_id}, limit=2)
+                    
+                    for h in hits:
+                        # M3 Format: {"query": q, "related_memories": ...}
+                        new_info.append({
+                            "query": q,
+                            "found": h.payload['content']
+                        })
+
+                if not new_info:
+                    print("⚠️ No new info found. Forcing next step to rethink.")
+                    knowledge_context.append({"system": "Previous search returned no results."})
+                else:
+                    knowledge_context.extend(new_info)
+
+            else:
+                print("⚠️ LLM confusion. Retrying...")
+
+        print("❌ Max steps reached without answer.")
 
     def generate_answer(self, user_query: str, context: List[Dict[str, Any]]):
         """

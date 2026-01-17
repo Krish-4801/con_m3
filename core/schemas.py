@@ -44,8 +44,9 @@ class VoiceObservation(BaseObservation):
 class VisualObservation(BaseObservation):
     """Global frame context (SigLIP + OCR + Objects)."""
     clip_embedding: List[float]
-    ocr_tokens: List[Dict[str, Any]]  
+    ocr_tokens: List[Dict[str, Any]]
     detected_objects: List[str]
+    spatial_metadata: Dict[str, Any] = field(default_factory=dict)
 
 @dataclass(kw_only=True)
 class MemoryNode:

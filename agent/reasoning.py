@@ -201,6 +201,111 @@ Generate episodic memories.
 
         return nodes
 
+    def generate_episodic_memory_m3_style(
+        self,
+        video_id: str,
+        clip_id: int,
+        visual_obs: VisualObservation,
+        faces: List[FaceObservation],
+        voices: List[VoiceObservation],
+    ) -> List[MemoryNode]:
+        """
+        M3-Agent Logic: visual-grounded prompt generation.
+        We send the LLM the face crops so it associates <face_X> with visual traits.
+        """
+
+        # 1. Prepare Face Context (unique faces)
+        unique_faces: Dict[str, str] = {}
+        for f in faces:
+            if getattr(f, "entity_id", None) and getattr(f, "base64_img", None):
+                if f.entity_id not in unique_faces:
+                    unique_faces[f.entity_id] = f.base64_img
+
+        face_blocks: List[str] = []
+        for fid, b64 in unique_faces.items():
+            face_blocks.append(f"<{fid}>:")
+            face_blocks.append(f"data:image/jpeg;base64,{b64}")
+
+        # 2. Prepare Voice Context
+        voice_log = []
+        for v in voices:
+            voice_log.append({
+                "start": getattr(v, "start_sec", None),
+                "end": getattr(v, "end_sec", None),
+                "content": getattr(v, "asr_text", ""),
+                "speaker": f"<{v.entity_id}>" if getattr(v, "entity_id", None) else "unknown",
+            })
+
+        voice_text = json.dumps(voice_log, indent=2)
+
+        system_prompt = """
+You are an AI agent building a memory graph for a video. 
+Describe the video clip events in detail.
+
+CRITICAL RULES:
+1. When you see a person from the provided face images, refer to them EXACTLY as <face_id>.
+2. When you hear a speaker from the logs, refer to them EXACTLY as <voice_id>.
+3. Determine relationships: If <face_0> is moving their lips while <voice_1> speaks, output "Equivalence: <face_0> is <voice_1>".
+4. Output JSON: {"episodic_memory": ["..."], "semantic_memory": ["..."], "equivalences": ["..."]}
+"""
+
+        user_prompt = (
+            f"Video Clip ID: {clip_id}.\n\nReferential Faces:\n"
+            + "\n".join(face_blocks)
+            + f"\n\nAudio Transcript:\n{voice_text}\n\nDescribe the events." 
+        )
+
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                response_format={"type": "json_object"},
+            )
+
+            raw = response.choices[0].message.content
+            data = self._safe_json_load(raw)
+
+            nodes: List[MemoryNode] = []
+            for mem in data.get("episodic_memory", []):
+                nodes.append(
+                    MemoryNode(
+                        video_id=video_id,
+                        clip_id=clip_id,
+                        content=mem,
+                        mem_type=MemoryType.EPISODIC,
+                    )
+                )
+
+            for mem in data.get("semantic_memory", []):
+                nodes.append(
+                    MemoryNode(
+                        video_id=video_id,
+                        clip_id=clip_id,
+                        content=mem,
+                        mem_type=MemoryType.SEMANTIC,
+                    )
+                )
+
+            # Attach any equivalence statements as semantic nodes too
+            for eq in data.get("equivalences", []):
+                nodes.append(
+                    MemoryNode(
+                        video_id=video_id,
+                        clip_id=clip_id,
+                        content=eq,
+                        mem_type=MemoryType.SEMANTIC,
+                    )
+                )
+
+            return nodes
+
+        except Exception as e:
+            logger.error(f"M3 Memory Gen Failed: {e}")
+            return []
+
     # ------------------------------------------------------------------
     # SEMANTIC DISTILLATION
     # ------------------------------------------------------------------

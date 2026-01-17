@@ -102,13 +102,24 @@ class GraphStore:
         query = """
         MATCH (c:Clip {id: $clip_id, video_id: $video_id})
         MERGE (m:Memory {id: $mem_id})
-        ON CREATE SET m.content = $content, m.type = $mem_type
+        ON CREATE SET m.content = $content, m.type = $mem_type, m.weight = 1.0
         MERGE (c)-[:HAS_MEMORY]->(m)
         """
         self.write_queue.put((query, {
             "mem_id": mem_id, "content": content, "mem_type": mem_type,
             "video_id": video_id, "clip_id": clip_id
         }))
+
+    def reinforce_node(self, mem_id: str, delta: float = 1.0):
+        """
+        M3 Logic: Increases the importance (weight) of a semantic node.
+        """
+        query = """
+        MATCH (m:Memory {id: $mem_id})
+        SET m.weight = coalesce(m.weight, 1.0) + $delta
+        RETURN m.weight
+        """
+        self.write_queue.put((query, {"mem_id": mem_id, "delta": delta}))
 
     def link_memory_to_entity(self, mem_id: str, entity_id: str, rel_type: str = "MENTIONS"):
         query = f"""
