@@ -47,7 +47,7 @@ class VoiceProcessor:
             raise e
 
         # 3. ASR (Whisper)
-        self.asr_model = whisper.load_model("base", device="cpu")
+        self.asr_model = whisper.load_model("tiny", device="cpu")
 
     def _bytes_to_audio_segment(self, audio_input: Union[str, bytes]) -> AudioSegment:
         if isinstance(audio_input, bytes):

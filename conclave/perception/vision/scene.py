@@ -7,12 +7,11 @@ from typing import List, Dict, Any
 from PIL import Image
 from ultralytics import YOLO
 from transformers import (
-    Qwen2VLForConditionalGeneration, 
-    AutoProcessor, 
+    BlipForConditionalGeneration,
+    BlipProcessor,
     SiglipVisionModel, 
     SiglipProcessor
 )
-from qwen_vl_utils import process_vision_info
 import easyocr
 from conclave.core.schemas import VisualObservation
 
@@ -23,7 +22,7 @@ class SceneProcessor:
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.torch_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
 
-        logger.info(f"Loading Scene Models (Qwen2-VL + SigLIP + YOLO) on {self.device}...")
+        logger.info(f"Loading Scene Models (BLIP + SigLIP + YOLO) on {self.device}...")
 
         # 1. SigLIP Base (For Embeddings)
         self.siglip_model = SiglipVisionModel.from_pretrained(
@@ -31,18 +30,14 @@ class SceneProcessor:
         ).to(self.device, dtype=self.torch_dtype).eval()
         self.siglip_processor = SiglipProcessor.from_pretrained("google/siglip-base-patch16-224")
 
-        # 2. Qwen2-VL-2B (For Detailed Captioning - REPLACES FLORENCE-2)
-        # Using 'Qwen/Qwen2-VL-2B-Instruct' - SOTA 2B model
-        # device_map="auto" is safe here, or explicit to device
-        self.vlm_model = Qwen2VLForConditionalGeneration.from_pretrained(
-            "Qwen/Qwen2-VL-2B-Instruct",
-            torch_dtype=self.torch_dtype,
-            device_map="cuda" if torch.cuda.is_available() else "cpu",
-            attn_implementation="sdpa" # Use PyTorch 2.0 Native Flash Attention
-        ).eval()
+        # 2. BLIP-Base (For Detailed Captioning)
+        self.vlm_model = BlipForConditionalGeneration.from_pretrained(
+            "Salesforce/blip-image-captioning-base",
+            torch_dtype=self.torch_dtype
+        ).to(self.device).eval()
         
-        self.vlm_processor = AutoProcessor.from_pretrained(
-            "Qwen/Qwen2-VL-2B-Instruct"
+        self.vlm_processor = BlipProcessor.from_pretrained(
+            "Salesforce/blip-image-captioning-base"
         )
 
         # 3. YOLO11n (For Object Detection)
@@ -66,55 +61,21 @@ class SceneProcessor:
         return (embeddings / (norms + 1e-6)).tolist()
 
     @torch.no_grad()
-    def _run_qwen_caption_sequential(self, pil_imgs: List[Image.Image], max_tokens: int = 80) -> List[str]:
+    def _run_blip_caption_sequential(self, pil_imgs: List[Image.Image], max_tokens: int = 50) -> List[str]:
         """
-        Runs Qwen2-VL on a list of images. Sequential is safer for VRAM 
-        with VLMs that handle dynamic resolutions.
-        Optimized with shorter prompts and token limits for speed.
+        Runs BLIP-Base on a list of images.
         """
         captions = []
-        prompt_text = "Describe this scene concisely." # Shorter prompt for speed
 
         for img in tqdm(pil_imgs, desc="Scene Captioning", leave=False):
-
-            # Qwen2-VL Input Format
-            messages = [
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "image", "image": img},
-                        {"type": "text", "text": prompt_text},
-                    ],
-                }
-            ]
+            inputs = self.vlm_processor(img, return_tensors="pt").to(self.device, self.torch_dtype)
             
-            # Prepare inputs
-            text = self.vlm_processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-            image_inputs, video_inputs = process_vision_info(messages)
-            
-            inputs = self.vlm_processor(
-                text=[text],
-                images=image_inputs,
-                videos=video_inputs,
-                padding=True,
-                return_tensors="pt",
-            ).to(self.device) # device placement handled by Qwen internals usually, but explicit safe
-
-            # Generate with token limit for speed
             generated_ids = self.vlm_model.generate(
                 **inputs, 
-                max_new_tokens=max_tokens  # SPEED LIMIT (default 80)
+                max_new_tokens=max_tokens
             )
             
-            # Trim input tokens from output
-            generated_ids_trimmed = [
-                out_ids[len(in_ids):] for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
-            ]
-            
-            output_text = self.vlm_processor.batch_decode(
-                generated_ids_trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False
-            )[0]
-            
+            output_text = self.vlm_processor.decode(generated_ids[0], skip_special_tokens=True)
             captions.append(output_text)
             
         return captions
@@ -128,9 +89,9 @@ class SceneProcessor:
         # 1. Embeddings (SigLIP - Batched)
         visual_vecs = self._get_siglip_embedding_batch(pil_imgs)
         
-        # 2. Captions (Qwen2-VL)
-        # Limit max_new_tokens to 80 for speed (concise descriptions)
-        captions = self._run_qwen_caption_sequential(pil_imgs, max_tokens=80)
+        # 2. Captions (BLIP)
+        # Limit max_new_tokens to 50 for speed
+        captions = self._run_blip_caption_sequential(pil_imgs, max_tokens=50)
         
         # 3. Object Detection (YOLO)
         yolo_results = self.yolo_model(frames_np, verbose=False, stream=False) 
