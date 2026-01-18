@@ -41,9 +41,9 @@ class FaceProcessor:
 
         # --- GENERALIZATION CONFIG ---
         # Instead of %, we use pixels. 
-        # A 30x30 pixel face is the minimum for recognition. 
+        # A 40x40 pixel face is the minimum for recognition. 
         # Anything smaller is just a blur or an emoji.
-        MIN_FACE_PIXELS = 30 
+        MIN_FACE_PIXELS = 40 
         
         faces_found = 0
         faces_skipped = 0

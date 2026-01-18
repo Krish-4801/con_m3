@@ -10,6 +10,7 @@ import queue
 import time
 import cv2
 import ffmpeg
+from tqdm import tqdm
 from typing import Dict, Any
 
 # Dynamic path handling
@@ -148,6 +149,14 @@ class ConclaveOrchestrator:
         # Use a small thread pool to run Scene/Face/Voice in parallel per-clip
         perception_executor = concurrent.futures.ThreadPoolExecutor(max_workers=3)
 
+        # Calculate estimated total clips for progress bar
+        stride = window_size - overlap
+        estimated_clips = int(np.ceil(total_duration / stride))
+        
+        # Initialize tqdm
+        pbar = tqdm(total=estimated_clips, desc="Processing Video Pipeline", unit="clip")
+
+
         while True:
             # If queue is empty, GPU is starving -> Bad.
             if clip_queue.empty():
@@ -161,7 +170,10 @@ class ConclaveOrchestrator:
             data = item["data"]
             current_start = item["start_time"]
             
-            logger.info(f"⚡ Processing Clip {clip_id} [{current_start:.1f}s] (Buffer: {clip_queue.qsize()})...")
+            # Update description instead of logging
+            # logger.info(f"⚡ Processing Clip {clip_id} [{current_start:.1f}s] (Buffer: {clip_queue.qsize()})...")
+            pbar.set_description(f"Processing Clip {clip_id} [{current_start:.1f}s]")
+
             
             # --- Parallel Tasks: Scene / Face / Voice ---
             def task_scene():
@@ -224,6 +236,11 @@ class ConclaveOrchestrator:
             # On A40 (48GB), we barely need this.
             if clip_id % 50 == 0:
                 torch.cuda.empty_cache()
+            
+            pbar.update(1)
+
+        pbar.close()
+
 
         perception_executor.shutdown()
         prefetcher.shutdown()

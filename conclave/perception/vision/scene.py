@@ -2,6 +2,7 @@ import cv2
 import torch
 import numpy as np
 import logging
+from tqdm import tqdm
 from typing import List, Dict, Any
 from PIL import Image
 from ultralytics import YOLO
@@ -44,8 +45,8 @@ class SceneProcessor:
             "Qwen/Qwen2-VL-2B-Instruct"
         )
 
-        # 3. YOLO11s (For Object Detection)
-        self.yolo_model = YOLO("yolo11s.pt") 
+        # 3. YOLO11n (For Object Detection)
+        self.yolo_model = YOLO("yolo11n.pt") 
 
         # 4. EasyOCR (For Text)
         self.ocr_reader = easyocr.Reader(['en'], gpu=(self.device.type == 'cuda'), verbose=False)
@@ -74,7 +75,8 @@ class SceneProcessor:
         captions = []
         prompt_text = "Describe this scene concisely." # Shorter prompt for speed
 
-        for img in pil_imgs:
+        for img in tqdm(pil_imgs, desc="Scene Captioning", leave=False):
+
             # Qwen2-VL Input Format
             messages = [
                 {

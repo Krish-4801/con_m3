@@ -11,7 +11,7 @@ def init_conclave():
     qc = QdrantClient(url=conf["qdrant"]["url"], api_key=conf["qdrant"]["api_key"])
     
     collections = {
-        "text_memories": 3072,   # text-embedding-3-large
+        "text_memories": 1536,   # text-embedding-3-small
         "face_memories": 512,    # InceptionResnetV1 (Facenet)
         "voice_memories": 192,   # SpeechBrain ECAPA-TDNN
         "visual_memories": 768   # SigLIP-base

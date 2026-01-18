@@ -3,6 +3,7 @@ import torch
 import numpy as np
 import base64
 import logging
+from tqdm import tqdm
 from typing import List, Dict, Any, Union
 from PIL import Image
 try:
@@ -49,7 +50,7 @@ class FaceProcessor:
         # Ignore faces smaller than 1.5% of the image area
         MIN_FACE_AREA_RATIO = 0.015 
 
-        for idx, frame_input in enumerate(frames):
+        for idx, frame_input in enumerate(tqdm(frames, desc="Face Detection", leave=False)):
             # Process every frame provided (Stride handled in main.py)
             img_bgr = frame_input if isinstance(frame_input, np.ndarray) else None
             if img_bgr is None: continue 

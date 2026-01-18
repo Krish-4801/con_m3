@@ -15,7 +15,7 @@ class EmbeddingManager:
         Features: LRU Caching, Batching, Exponential Backoff.
         """
         self.vector_store = vector_store
-        self.model = config.get("model", "text-embedding-3-large")
+        self.model = config.get("model", "text-embedding-3-small")
         self.api_key = config.get("api_key")
         self.batch_size = config.get("batch_size", 100)
         self.max_retries = config.get("max_retries", 5)

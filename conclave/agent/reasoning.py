@@ -171,7 +171,7 @@ class ReasoningAgent:
 
     def _extract_tags(self, text: str) -> List[str]:
         """Regex to pull <face_...> and <voice_...> tags for graph linking."""
-        pattern = r'<((?:face|voice)_[a-zA-Z0-9\-]+)>'
+        pattern = r'<((?:ent_)?(?:face|voice)_[a-zA-Z0-9\-]+)>'
         return list(set(re.findall(pattern, text)))
 
     # ------------------------------------------------------------------

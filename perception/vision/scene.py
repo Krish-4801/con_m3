@@ -40,8 +40,8 @@ class SceneProcessor:
         else:
             logger.warning("⚠️ Gemini API credentials missing. Captions will be skipped.")
         
-        # Logic: Caption every 3rd frame (Every ~3 seconds at 1FPS)
-        self.caption_interval = 3
+        # Logic: Caption every 5th frame (Every ~5 seconds at 1FPS)
+        self.caption_interval = 5
         
         logger.info(f"⚡ Loading Lightweight Stack (YOLO + SigLIP) on {self.device}...")
 
@@ -53,7 +53,7 @@ class SceneProcessor:
         self.ocr_reader = easyocr.Reader(['en'], gpu=(self.device.type == 'cuda'), verbose=False)
 
         # 4. YOLO (Local) - With Warmup
-        self.yolo_model = YOLO("yolo11s.pt")
+        self.yolo_model = YOLO("yolo11n.pt")
         if self.device.type == 'cuda':
             # Run dummy inference to initialize CUDA context to prevent asserts later
             try:

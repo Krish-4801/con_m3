@@ -3,6 +3,7 @@ import os
 import torch
 import logging
 import numpy as np
+from tqdm import tqdm
 from typing import List, Dict, Any, Union
 from pydub import AudioSegment
 import whisper
@@ -87,8 +88,8 @@ class VoiceProcessor:
         metadata = []
 
         temp_seg_file = f"temp_seg_{video_id}.wav"
-
-        for ts in speech_timestamps:
+        
+        for ts in tqdm(speech_timestamps, desc="Voice Processing", leave=False):
             start_ms = int(ts['start'] / 16000 * 1000)
             end_ms = int(ts['end'] / 16000 * 1000)
             
