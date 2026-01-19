@@ -34,6 +34,11 @@ class IdentityManager:
         # entity_id -> { 'type': ..., 'alias': ..., 'canonical_id': ... }
         self.entity_index: Dict[str, Dict[str, Any]] = {}
         
+        # M3 Alignment: Character Mappings (Union-Find Cache)
+        # character_id -> [face_id_1, voice_id_2, ...]
+        self.character_mappings = {} 
+        self.reverse_character_mappings = {} # face_id_1 -> character_id
+
         self.collections = {
             "face": "face_memories",
             "voice": "voice_memories"
@@ -201,7 +206,7 @@ class IdentityManager:
         WHERE m IS NOT NULL
         MERGE (m)-[:MENTIONS]->(primary)
         WITH secondary
-        DETACH DELETE secondary
+        // DETACH DELETE secondary  <-- M3 Alignment: Stop destroying nodes
         """
         # 🔥 FIX: Use execute_async
         self.graph_store.execute_async(merge_query, {
@@ -298,6 +303,70 @@ class IdentityManager:
             logger.info(f"🧠 Semantic equivalence detected: {m['source']} = {m['target']}")
             logger.debug(f"Evidence: {m['evidence'][:100]}...")
             self.merge_identities(m['source'], m['target'], video_id)
+
+    def refresh_equivalences(self, video_id: str):
+        """
+        M3-Agent Logic: Parses 'Equivalence: ...' text nodes from Neo4j
+        and builds dynamic character mappings using Union-Find.
+        """
+        # 1. Fetch all semantic memories containing "Equivalence"
+        query = """
+        MATCH (m:Memory {type: 'semantic', video_id: $video_id})
+        WHERE toLower(m.content) STARTS WITH 'equivalence'
+        RETURN m.content as content
+        """
+        results = self.graph_store.run_query(query, {"video_id": video_id})
+        
+        # 2. Initialize Union-Find structure
+        parent = {}
+        
+        def find(i):
+            if i not in parent: parent[i] = i
+            if parent[i] != i: parent[i] = find(parent[i])
+            return parent[i]
+
+        def union(i, j):
+            root_i = find(i)
+            root_j = find(j)
+            if root_i != root_j: parent[root_i] = root_j
+
+        # 3. Process raw tags
+        import re
+        tag_pattern = re.compile(r'<((?:ent_)?(?:face|voice)_[a-zA-Z0-9\-]+)>')
+
+        all_tags = set()
+        
+        # Build sets from Equivalence memories
+        for res in results:
+            content = res.get('content', '')
+            tags = tag_pattern.findall(content)
+            for tag in tags:
+                all_tags.add(tag)
+            
+            # Link tags in the same equivalence statement
+            if len(tags) >= 2:
+                base = tags[0]
+                for other in tags[1:]:
+                    union(base, other)
+
+        # 4. Group into Characters
+        self.character_mappings = {}
+        self.reverse_character_mappings = {}
+        
+        groups = {}
+        for tag in all_tags:
+            root = find(tag)
+            if root not in groups: groups[root] = []
+            groups[root].append(tag)
+            
+        # Assign "Character_X" IDs
+        for idx, (root, tags) in enumerate(groups.items()):
+            char_id = f"character_{idx}"
+            self.character_mappings[char_id] = tags
+            for tag in tags:
+                self.reverse_character_mappings[tag] = char_id
+                
+        logger.info(f"✅ Refreshed M3 Equivalences: Found {len(self.character_mappings)} characters.")
 
     def get_entity_stats(self, video_id: str) -> Dict[str, Any]:
         """

@@ -3,210 +3,244 @@ import sys
 import json
 import logging
 import argparse
-from typing import List, Dict, Any
-import openai
-from conclave.agent.m3_prompts import (
-    prompt_generate_plan,
-    prompt_generate_action_with_plan,
-    prompt_generate_action_with_plan_multiple_queries,
-)
+import re
+import ast
+from typing import List, Dict, Any, Optional
 
-# Dynamic path handling
-import os
-import sys
+import openai
 
 # Add parent directory to path for package imports
 project_root = os.path.dirname(os.path.abspath(__file__))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
-    
-current_dir = os.path.dirname(os.path.abspath(__file__))
-parent_dir = os.path.dirname(current_dir)
-if parent_dir not in sys.path:
-    sys.path.append(parent_dir)
 
-
+# Import Conclave modules
 from conclave.core.engine import ConclaveEngine
-from conclave.core.embedding_service import EmbeddingService
-import ast
+from conclave.core.identity import IdentityManager
+from conclave.agent.m3_prompts import (
+    prompt_generate_plan,
+    prompt_generate_action_with_plan,
+    prompt_generate_action_with_plan_multiple_queries,
+    prompt_generate_action_with_plan_new_direction,
+)
 
-# Configure logging to be clean for CLI output
-logging.basicConfig(level=logging.ERROR) 
+# Logging setup
+logging.basicConfig(level=logging.ERROR)
+logger = logging.getLogger("Conclave.QuerySystem")
 
 class ConclaveQuerier:
     def __init__(self, config_path: str, video_id: str):
+        if not os.path.exists(config_path):
+            raise FileNotFoundError(f"Config file not found: {config_path}")
+
         with open(config_path, "r") as f:
             self.config = json.load(f)
         
         self.video_id = video_id
+        
+        # Initialize Engine (Reuses connection logic and embedding service)
         self.engine = ConclaveEngine(video_id=video_id, config_path=config_path)
         
-        # We need the embedder to turn the question into a vector
-        self.embedder = EmbeddingService(self.config["text-embedding-3-small"])
+        # Reuse Engine's embedder to ensure consistency with ingestion
+        self.embedder = self.engine.embedding_service
         
-        # LLM Client
+        # Identity Manager for character mappings (Union-Find)
+        self.identity_manager = IdentityManager(self.engine.vector_store, self.engine.graph_store, self.engine.api_config)
+        
+        # LLM Client Setup
         api_conf = self.config.get("api", {})
-        self.model = api_conf.get("model", "gemini-3-flash-preview")
+        self.model = api_conf.get("model", "gpt-4o") # Default to high capability
         
-        if "gemini" in self.model.lower():
-            api_key = api_conf.get("gemini_api_key")
-            base_url = api_conf.get("gemini_base_url")
-            self.client = openai.OpenAI(api_key=api_key, base_url=base_url)
+        # Logic to handle Gemini vs OpenAI config
+        if "gemini" in self.config and "gemini" in self.model.lower():
+             g_conf = self.config["gemini"]
+             self.client = openai.OpenAI(
+                 api_key=g_conf.get("api_key"),
+                 base_url=g_conf.get("base_url")
+             )
         else:
-            api_key = api_conf.get("openai_api_key") or api_conf.get("api_key")
-            self.client = openai.OpenAI(api_key=api_key)
+             self.client = openai.OpenAI(
+                 api_key=api_conf.get("openai_api_key") or api_conf.get("api_key")
+             )
 
-    def retrieve_knowledge(self, query_text: str, top_k: int = 10) -> List[Dict[str, Any]]:
+    def _fetch_clip_context(self, clip_id: int) -> Dict[str, Any]:
         """
-        Performs GraphRAG: Vector Search -> Graph Context Expansion
+        Directly retrieves what happened in a specific clip from Graph + Vector Store.
+        Used when the agent specifically asks to "See CLIP_X".
         """
-        print(f"🔍 Searching Memory Bank for: '{query_text}'...")
-        
-        # 1. Embed Question
-        query_vec = self.embedder.get_embeddings_batched([query_text])[0]
-        
-        # 2. Vector Search (Qdrant) - Find relevant episodic/semantic memories
-        # We search 'text_memories' which contains the synthesis of Visual+Face+Voice
-        hits = self.engine.vector_store.search(
-            collection="text_memories",
-            vector=query_vec,
-            filter_kv={"video_id": self.video_id},
-            limit=top_k
-        )
-        
-        context_results = []
-        
-        for hit in hits:
-            mem_id = hit.id
-            score = hit.score
-            content = hit.payload.get("content")
-            clip_id = hit.payload.get("clip_id")
-            
-            # 3. Graph Expansion (Neo4j)
-            # Find entities mentioned in this memory AND entities physically present in the clip
-            query = """
-            MATCH (m:Memory {id: $mem_id})
-            // Get explicitly linked entities
-            OPTIONAL MATCH (m)-[:MENTIONS]->(e:Entity)
-            WITH m, collect(e.id) as mentioned_entities
-            
-            // Get co-occurring entities in the same clip (Spatial Context)
-            MATCH (c:Clip {id: $clip_id, video_id: $video_id})
-            OPTIONAL MATCH (p:Entity)-[r:APPEARED_IN]->(c)
-            
-            RETURN mentioned_entities, collect({id: p.id, type: p.type, ts: r.ts_ms}) as present_entities
-            """
-            
-            graph_data = self.engine.graph_store.run_query(query, {
-                "mem_id": mem_id, 
-                "clip_id": clip_id, 
-                "video_id": self.video_id
-            })
-            
-            context_results.append({
-                "clip_id": clip_id,
-                "score": score,
-                "memory_text": content,
-                "graph_context": graph_data[0] if graph_data else {}
-            })
-            
-        return context_results
-
-    def iterative_reasoning_loop(self, query: str, max_steps: int = 5):
+        query = """
+        MATCH (c:Clip {id: $clip_id, video_id: $video_id})
+        OPTIONAL MATCH (c)-[:HAS_MEMORY]->(m:Memory)
+        OPTIONAL MATCH (p:Entity)-[r:APPEARED_IN]->(c)
+        RETURN 
+            collect(DISTINCT m.content) as memories,
+            collect(DISTINCT {id: p.id, type: p.type}) as entities
         """
-        M3-Agent Logic: Search -> Reason -> Answer Loop
+        result = self.engine.graph_store.run_query(query, {
+            "clip_id": clip_id,
+            "video_id": self.video_id
+        })
+        
+        if not result or not result[0]:
+            return {"error": f"Clip {clip_id} not found."}
+            
+        data = result[0]
+        return {
+            "source": f"Direct Lookup CLIP_{clip_id}",
+            "memories": data['memories'],
+            "entities_present": [e['id'] for e in data['entities']]
+        }
+
+    def back_translate(self, query: str) -> List[str]:
         """
-        current_knowledge = []
-        history = []
+        M3-Agent Logic: Expands a high-level query into specific modality queries.
+        E.g., "Who is character_0?" -> ["Who is <face_123>?", "Who is <voice_456>?"]
+        """
+        # Ensure mappings are fresh
+        self.identity_manager.refresh_equivalences(self.video_id)
+        mappings = self.identity_manager.character_mappings
+        
+        expanded_queries = [query]
+        
+        # Check if query contains any known character IDs (e.g. character_0)
+        # This regex looks for character_0, character_1, etc.
+        char_matches = re.findall(r'(character_\d+)', query)
+        
+        for char_id in char_matches:
+            if char_id in mappings:
+                specific_tags = mappings[char_id] # ['face_123', 'voice_456']
+                
+                new_variations = []
+                for base_q in expanded_queries:
+                    for tag in specific_tags:
+                        # Create a variation replacing 'character_X' with '<face_Y>'
+                        new_q = base_q.replace(char_id, f"<{tag}>")
+                        new_variations.append(new_q)
+                
+                expanded_queries.extend(new_variations)
+        
+        return list(set(expanded_queries))
 
-        system_prompt = """
-You are an intelligent agent answering questions about a long video.
-You have a memory bank you can search.
+    def retrieve_knowledge(self, query_text: str, top_k: int = 5) -> List[Dict[str, Any]]:
+        """
+        Performs GraphRAG: Vector Search -> Graph Context Expansion.
+        Robustly handles both Episodic (Clip-bound) and Semantic (Global) memories.
+        """
+        # 1. Expand Query (M3 Logic)
+        expanded_queries = self.back_translate(query_text)
+        if len(expanded_queries) > 1:
+            print(f"M3 Expansion: {len(expanded_queries)} variations generated.")
 
-Process:
-1. Analyze the user question and current knowledge.
-2. Decide if you have enough info to answer.
-3. If NO: Output "Action: [Search] <query>"
-4. If YES: Output "Action: [Answer] <final_answer>"
-
-Constraint: Use specific entity IDs (e.g., face_1, voice_2) in searches if known.
-"""
-
-        for step in range(max_steps):
-            context_str = "\n".join([f"KB Item: {k}" for k in current_knowledge])
-            prompt = f"Question: {query}\n\nRetrieved Knowledge:\n{context_str}\n\nHistory:\n{history}\n\nWhat is your next action?"
-
-            try:
-                response = self.client.chat.completions.create(
-                    model=self.model,
-                    messages=[
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": prompt},
-                    ],
-                )
-
-                content = response.choices[0].message.content
-                history.append(content)
-                print(f"Step {step+1}: {content}")
-
-                if "[Answer]" in content:
-                    final_ans = content.split("[Answer]", 1)[1].strip()
-                    print(f"✅ Final Answer: {final_ans}")
-                    return final_ans
-
-                elif "[Search]" in content:
-                    search_q = content.split("[Search]", 1)[1].strip()
-                    vec = self.embedder.get_embeddings_batched([search_q])[0]
-                    hits = self.engine.vector_store.search(self.engine.collections["text"], vec, {"video_id": self.video_id}, limit=3)
-                    new_info = [h.payload.get('content') for h in hits if h.payload]
-                    current_knowledge.extend(new_info)
-
+        all_context_results = []
+        
+        for q in expanded_queries:
+            # 1. Embed Question
+            query_vec = self.embedder.get_embeddings_batched([q])[0]
+            
+            # 2. Vector Search (Qdrant)
+            hits = self.engine.vector_store.search(
+                collection="text_memories",
+                vector=query_vec,
+                filter_kv={"video_id": self.video_id},
+                limit=top_k
+            )
+            
+            for hit in hits:
+                mem_id = hit.id
+                score = hit.score
+                content = hit.payload.get("content")
+                clip_id = hit.payload.get("clip_id") # Can be None for semantic memories
+                
+                # 3. Graph Expansion (Neo4j)
+                params = {
+                    "mem_id": mem_id, 
+                    "video_id": self.video_id
+                }
+                
+                # Base query: Get entities mentioned in the text
+                cypher = """
+                MATCH (m:Memory {id: $mem_id})
+                OPTIONAL MATCH (m)-[:MENTIONS]->(e:Entity)
+                WITH m, collect(e.id) as mentioned_ids
+                """
+                
+                # Conditional query: If attached to a clip, get entities present in that clip
+                if clip_id is not None:
+                    cypher += """
+                    OPTIONAL MATCH (c:Clip {id: $clip_id, video_id: $video_id})
+                    OPTIONAL MATCH (p:Entity)-[:APPEARED_IN]->(c)
+                    RETURN mentioned_ids, collect(DISTINCT p.id) as present_ids
+                    """
+                    params["clip_id"] = clip_id
                 else:
-                    print("⚠️ Unrecognized action, performing default search.")
-                    vec = self.embedder.get_embeddings_batched([query])[0]
-                    hits = self.engine.vector_store.search(self.engine.collections["text"], vec, {"video_id": self.video_id}, limit=3)
-                    new_info = [h.payload.get('content') for h in hits if h.payload]
-                    current_knowledge.extend(new_info)
-
-            except Exception as e:
-                print(f"LLM decision error: {e}")
-
-        print("❌ Max steps reached.")
-        return None
+                    cypher += """
+                    RETURN mentioned_ids, [] as present_ids
+                    """
+    
+                graph_data = self.engine.graph_store.run_query(cypher, params)
+                
+                # Robust unpacking
+                g_res = graph_data[0] if graph_data else {"mentioned_ids": [], "present_ids": []}
+                
+                all_context_results.append({
+                    "type": "retrieval",
+                    "query": q,
+                    "score": score,
+                    "clip_id": clip_id,
+                    "memory_text": content,
+                    "entities": list(set(g_res['mentioned_ids'] + g_res['present_ids']))
+                })
+        
+        # Deduplicate results based on memory_text
+        seen_memories = set()
+        unique_results = []
+        for res in sorted(all_context_results, key=lambda x: x['score'], reverse=True):
+            if res['memory_text'] not in seen_memories:
+                unique_results.append(res)
+                seen_memories.add(res['memory_text'])
+            
+        return unique_results[:top_k]
 
     def execute_m3_control_loop(self, question: str):
         """
         The M3-Agent Controller Logic.
         1. Generate Plan
-        2. Iterative Loop (Search <-> Reason)
+        2. Iterative Loop (Search/Look <-> Reason)
         3. Final Answer
         """
-        print(f"❓ Question: {question}")
+        print(f"\n❓ Question: {question}")
+        print("-" * 50)
 
         # --- STEP 1: Generate Retrieval Plan ---
         plan_messages = [
             {"role": "system", "content": prompt_generate_plan.format(question=question)}
         ]
-        plan_resp = self.client.chat.completions.create(
-            model=self.model, messages=plan_messages
-        )
-        retrieval_plan = plan_resp.choices[0].message.content
-        print(f"📋 Plan: {retrieval_plan}")
+        
+        try:
+            plan_resp = self.client.chat.completions.create(
+                model=self.model, messages=plan_messages
+            )
+            retrieval_plan = plan_resp.choices[0].message.content
+            print(f"📋 Plan:\n{retrieval_plan}\n")
+        except Exception as e:
+            print(f"❌ Error generating plan: {e}")
+            return
 
         # --- STEP 2: The Control Loop ---
-        knowledge_context = [] # List of strings
+        knowledge_context = [] 
         max_steps = 5
+        route_switch = False
         
         for step in range(max_steps):
-            # Prepare context for the "Thinker"
-            # We construct the prompt dynamically based on collected knowledge
-            knowledge_str = json.dumps(knowledge_context, indent=2)
+            # Limit context size to avoid token overflow
+            knowledge_str = json.dumps(knowledge_context[-15:], indent=2) 
             
-            # Select prompt: If it's the first step, simple plan. 
-            # If previous steps failed, M3 implies using _multiple_queries or _new_direction.
-            # We'll use the robust _multiple_queries prompt for general cases.
-            prompt_template = prompt_generate_action_with_plan_multiple_queries
-            
+            # M3 Logic: Switch prompt if we are stuck
+            if route_switch:
+                prompt_template = prompt_generate_action_with_plan_new_direction
+            else:
+                prompt_template = prompt_generate_action_with_plan_multiple_queries
+
             user_content = prompt_template.format(
                 question=question,
                 retrieval_plan=retrieval_plan,
@@ -214,115 +248,106 @@ Constraint: Use specific entity IDs (e.g., face_1, voice_2) in searches if known
             )
 
             # Call LLM
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=[{"role": "user", "content": user_content}]
-            )
-            raw_output = response.choices[0].message.content
+            try:
+                response = self.client.chat.completions.create(
+                    model=self.model,
+                    messages=[{"role": "user", "content": user_content}]
+                )
+                raw_output = response.choices[0].message.content.strip()
+            except Exception as e:
+                print(f"❌ LLM Error: {e}")
+                break
+
+            print(f"🤖 Step {step+1} Output: {raw_output[:100]}...")
 
             # --- STEP 3: Parse Action ---
             if "[ANSWER]" in raw_output:
-                # Extraction logic
-                final_answer = raw_output.split("[ANSWER]")[1].strip()
-                print(f"✅ Final Answer: {final_answer}")
+                final_answer = raw_output.split("[ANSWER]", 1)[1].strip()
+                print("\n" + "="*60)
+                print(f"✅ FINAL ANSWER")
+                print("="*60)
+                print(final_answer)
                 return final_answer
             
             elif "[SEARCH]" in raw_output:
-                # Extraction logic for queries
-                # M3 often outputs: [SEARCH] ["query1", "query2"]
-                search_part = raw_output.split("[SEARCH]", 1)[1].strip()
-                
-                # Attempt robust parsing
-                queries = []
+                # Robust extraction of queries from potential JSON or list text
                 try:
-                    # 1. Try to find a JSON-like list in the text
-                    import re
-                    json_match = re.search(r'\[\s*".*?"\s*(?:,\s*".*?"\s*)*\]', search_part, re.DOTALL)
-                    if json_match:
-                        queries = ast.literal_eval(json_match.group(0))
+                    search_part = raw_output.split("[SEARCH]", 1)[1].strip()
+                    # Clean up markdown code blocks if present
+                    search_part = search_part.replace("```json", "").replace("```", "").strip()
+                    
+                    if search_part.startswith("[") and search_part.endswith("]"):
+                         queries = json.loads(search_part)
                     else:
-                        # 2. Try literal_eval of the whole part
-                        queries = ast.literal_eval(search_part)
-                except Exception:
-                    # 3. Fallback: Split by lines if it looks like a list
-                    lines = [l.strip("-*•123456789. ") for l in search_part.splitlines() if l.strip()]
-                    queries = [l for l in lines if l]
-                
-                # Final cleanup
-                if isinstance(queries, str):
-                    queries = [queries]
-                elif not isinstance(queries, list):
-                    queries = [str(queries)]
-                
-                # Filter out any non-string items or empty strings
-                queries = [q for q in queries if isinstance(q, str) and q.strip()]
-                
-                if not queries:
-                    # Last ditch fallback: use the first line of search_part
-                    first_line = search_part.splitlines()[0].strip() if search_part else ""
-                    if first_line:
-                        queries = [first_line]
+                         # Fallback to simple split
+                         queries = [line.strip("- \"'") for line in search_part.splitlines() if line.strip()]
+                    
+                    if isinstance(queries, str): queries = [queries]
+                    queries = [str(q) for q in queries if q]
 
-                print(f"🔍 Step {step+1} Searching: {queries}")
+                except Exception as e:
+                    print(f"⚠️ Failed to parse queries: {e}. Using raw text.")
+                    queries = [raw_output.split("[SEARCH]", 1)[1].strip()]
 
+                print(f"🔍 Searching: {queries}")
 
                 # Execute Searches
-                new_info = []
+                found_new_info = False
                 for q in queries:
-                    # Handle "CLIP_x" queries (M3 Logic)
-                    if "CLIP_" in q:
-                         # Extraction of clip ID logic would go here
-                         # For now, treat as vector search
-                         pass
-                    
-                    # Vector Search
-                    q_vec = self.embedder.get_embeddings_batched([q])[0]
-                    hits = self.engine.vector_store.search("text_memories", q_vec, {"video_id": self.video_id}, limit=2)
-                    
-                    for h in hits:
-                        # M3 Format: {"query": q, "related_memories": ...}
-                        new_info.append({
-                            "query": q,
-                            "found": h.payload['content']
-                        })
+                    # 1. Handle "CLIP_x" direct lookups
+                    clip_match = re.search(r"CLIP_(\d+)", q, re.IGNORECASE)
+                    if clip_match:
+                        clip_id = int(clip_match.group(1))
+                        print(f"   -> Direct Lookup: Clip {clip_id}")
+                        clip_data = self._fetch_clip_context(clip_id)
+                        knowledge_context.append(clip_data)
+                        found_new_info = True
+                        continue
 
-                if not new_info:
-                    print("⚠️ No new info found. Forcing next step to rethink.")
-                    knowledge_context.append({"system": "Previous search returned no results."})
+                    # 2. Handle Semantic/Vector Search
+                    results = self.retrieve_knowledge(q, top_k=2)
+                    if results:
+                        found_new_info = True
+                        for r in results:
+                            knowledge_context.append({
+                                "query": q,
+                                "memory": r["memory_text"],
+                                "related_entities": r["entities"],
+                                "clip_id": r["clip_id"]
+                            })
+
+                if not found_new_info:
+                    print("⚠️ No info found. Switching reasoning route.")
+                    knowledge_context.append({"system_note": "Previous search yielded no results."})
+                    route_switch = True
                 else:
-                    knowledge_context.extend(new_info)
+                    route_switch = False
 
             else:
-                print("⚠️ LLM confusion. Retrying...")
+                print("⚠️ Unrecognized action pattern. Retrying...")
+                knowledge_context.append({"system_note": "Invalid output format. Please use [SEARCH] or [ANSWER]."})
 
         print("❌ Max steps reached without answer.")
 
     def generate_answer(self, user_query: str, context: List[Dict[str, Any]]):
         """
-        Synthesizes the answer using LLM + Context
+        Synthesizes the answer using LLM + Context (Standard RAG)
         """
         if not context:
-            print("❌ No relevant information found in the video memory.")
+            print("❌ No relevant information found.")
             return
 
         # Format context for the LLM
         context_str = ""
-        for item in sorted(context, key=lambda x: x['clip_id']):
-            clip_idx = item['clip_id']
-            text = item['memory_text']
-            
-            # Parse graph data
-            g = item['graph_context']
-            mentions = g.get('mentioned_entities', [])
-            present = [p['id'] for p in g.get('present_entities', []) if p['id']]
-            
-            # Deduplicate entities
-            all_entities = list(set(mentions + present))
+        for item in sorted(context, key=lambda x: x.get('clip_id') or -1):
+            clip_info = f"[Clip ID: {item['clip_id']}]" if item.get('clip_id') is not None else "[Global Memory]"
+            text = item.get('memory_text', '')
+            entities = item.get('entities', [])
             
             context_str += f"""
-            [Clip ID: {clip_idx}]
+            {clip_info}
             Description: {text}
-            Related Entities (IDs): {all_entities}
+            Related Entities: {entities}
             ------------------------------------------------
             """
 
@@ -332,36 +357,31 @@ Constraint: Use specific entity IDs (e.g., face_1, voice_2) in searches if known
         
         FORMATTING RULES:
         1. **Direct Answer**: Start with a clear, direct answer.
-        2. **Reasoning**: Explain *why* you concluded this based on the visual/audio evidence in the context.
+        2. **Reasoning**: Explain *why* you concluded this based on evidence.
         3. **Citations**: You MUST cite the [Clip ID] for every claim.
         4. **Timeline**: If describing a sequence, provide a chronological breakdown.
-        5. **Entities**: If referring to a specific person/object ID (e.g., ent_face_...), refer to them as "Person <ID>" unless a name is available in the text.
-        
-        If the information is missing, state clearly that it is not in the processed video memory.
         """
 
-        print("🧠 Reasoning...")
-        
         try:
             response = self.client.chat.completions.create(
                 model=self.model,
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": f"Context:\n{context_str}\n\nQuestion: {user_query}"}
-                ],
-                temperature=0.3 # Low temperature for factual accuracy
+                ]
             )
             
             answer = response.choices[0].message.content
-            
             print("\n" + "="*60)
             print(f"🤖 CONCLAVE ANSWER")
             print("="*60)
             print(answer)
             print("="*60)
+            return answer
             
         except Exception as e:
             print(f"Error generating answer: {e}")
+            return None
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Query the Conclave Memory System")
@@ -380,12 +400,7 @@ if __name__ == "__main__":
     querier = ConclaveQuerier(args.config, args.video_id)
     
     if args.iterative:
-        # Run iterative M3 control loop
         querier.execute_m3_control_loop(args.query)
     else:
-        # Standard flow
-        # 1. Retrieve
         knowledge = querier.retrieve_knowledge(args.query)
-        
-        # 2. Answer
         querier.generate_answer(args.query, knowledge)

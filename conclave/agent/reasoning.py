@@ -70,21 +70,22 @@ class ReasoningAgent:
             context_blocks.append(f"### Visible Text/Slides:\n{unique_ocr}")
 
         # 2. Face Context (The Cast)
-        # We only list WHO is present, not every millisecond they were seen.
+        context_blocks.append("Face features:")
         if faces:
-            unique_entities = sorted(list(set([f.entity_id for f in faces if f.entity_id])))
-            cast_list = ", ".join([f"<{uid}>" for uid in unique_entities])
-            context_blocks.append(f"### Cast (Visual Entities Present):\n{cast_list}")
+            unique_faces = sorted(list(set([f.entity_id for f in faces if f.entity_id])))
+            for f_id in unique_faces:
+                 context_blocks.append(f"<{f_id}> detected.")
+        else:
+            context_blocks.append("No faces detected.")
 
         # 3. Voice Context (The Script)
-        # We provide the transcript with timestamps to help ground the narrative.
+        context_blocks.append("Voice features:")
         if voices:
-            context_blocks.append("### Audio Transcript:")
             for v in voices:
                 if v.entity_id and len(v.asr_text) > 2: # Filter empty noise
-                    context_blocks.append(
-                        f"- <{v.entity_id}> ({v.start_sec:.1f}s): \"{v.asr_text}\""
-                    )
+                    context_blocks.append(f"<{v.entity_id}>: {v.asr_text}")
+        else:
+            context_blocks.append("No voices detected.")
 
         return "\n\n".join(context_blocks)
 
