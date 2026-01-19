@@ -80,11 +80,20 @@ class SceneProcessor:
                     "role": "user", 
                     "content": [
                         # UPDATED PROMPT: Request action and interaction description
-                        {"type": "text", "text": "Describe the main action and interaction in this frame. What are the people doing? Be concise."},
+                        {"type": "text", "text": '''Analyze this video frame in extreme detail.
+1. VISUAL INVENTORY: List visible objects. For each major object, describe its:
+               - Shape
+               - Color
+               - Material/Texture
+2. Describe their specific actions, gestures, and any interactions between them.
+Note any clearly visible text or significant environmental items.
+Your output must be a series of short, atomic sentences, one per line.
+Focus on the narrative context—what is happening in this scene?
+Keep descriptions dynamic and avoid static attributes like color or material unless relevant to the action.
+3. OCR DATA: Transcribe ALL visible text found in the image explicitly. If there is text, quote it.'''},
                         {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}
                     ]
-                }],
-                max_tokens=1000
+                }]
             )
             if resp.choices:
                 content = resp.choices[0].message.content
