@@ -7,8 +7,8 @@ from typing import List, Dict, Any
 from PIL import Image
 from ultralytics import YOLO
 from transformers import (
-    Florence2ForConditionalGeneration,
-    AutoProcessor,
+    BlipProcessor,
+    BlipForConditionalGeneration,
     SiglipVisionModel, 
     SiglipProcessor
 )
@@ -30,17 +30,12 @@ class SceneProcessor:
         ).to(self.device, dtype=self.torch_dtype).eval()
         self.siglip_processor = SiglipProcessor.from_pretrained("google/siglip-base-patch16-224")
 
-        # 2. Florence-2 Base (For Detailed Captioning)
-        self.vlm_model = Florence2ForConditionalGeneration.from_pretrained(
-            "microsoft/Florence-2-base",
-            torch_dtype=self.torch_dtype,
-            trust_remote_code=True
-        ).to(self.device).eval()
+        # 2. BLIP Base (For Detailed Captioning)
+        self.vlm_model = BlipForConditionalGeneration.from_pretrained(
+            "Salesforce/blip-image-captioning-base"
+        ).to(self.device, dtype=self.torch_dtype).eval()
         
-        self.vlm_processor = AutoProcessor.from_pretrained(
-            "microsoft/Florence-2-base",
-            trust_remote_code=True
-        )
+        self.vlm_processor = BlipProcessor.from_pretrained("Salesforce/blip-image-captioning-base")
 
         # 3. YOLO11n (For Object Detection)
         self.yolo_model = YOLO("yolo11n.pt") 
@@ -65,30 +60,18 @@ class SceneProcessor:
     @torch.no_grad()
     def _run_vlm_caption_sequential(self, pil_imgs: List[Image.Image], max_tokens: int = 128) -> List[str]:
         """
-        Runs Florence-2-Base on a list of images.
+        Runs BLIP-Base on a list of images.
         """
         captions = []
-        prompt = "<DETAILED_CAPTION>"
-
         for img in tqdm(pil_imgs, desc="Scene Captioning", leave=False):
-            inputs = self.vlm_processor(text=prompt, images=img, return_tensors="pt").to(self.device, self.torch_dtype)
+            inputs = self.vlm_processor(images=img, return_tensors="pt").to(self.device, dtype=self.torch_dtype)
             
-            generated_ids = self.vlm_model.generate(
-                input_ids=inputs["input_ids"],
-                pixel_values=inputs["pixel_values"],
-                max_new_tokens=max_tokens,
-                do_sample=False,
-                num_beams=3
+            outputs = self.vlm_model.generate(
+                **inputs,
+                max_new_tokens=max_tokens
             )
             
-            generated_text = self.vlm_processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
-            parsed_answer = self.vlm_processor.post_process_generation(
-                generated_text, 
-                task=prompt, 
-                image_size=(img.width, img.height)
-            )
-            
-            caption = parsed_answer[prompt]
+            caption = self.vlm_processor.decode(outputs[0], skip_special_tokens=True)
             captions.append(caption)
             
         return captions
@@ -102,7 +85,7 @@ class SceneProcessor:
         # 1. Embeddings (SigLIP - Batched)
         visual_vecs = self._get_siglip_embedding_batch(pil_imgs)
         
-        # 2. Captions (Florence-2)
+        # 2. Captions (BLIP)
         # Limit max_new_tokens to 128 for detailed descriptions
         captions = self._run_vlm_caption_sequential(pil_imgs, max_tokens=128)
         

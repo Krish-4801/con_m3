@@ -10,8 +10,8 @@ class TestModelMigration(unittest.TestCase):
     def setUp(self):
         self.config = {"min_duration_for_audio": 0.5}
 
-    @patch("conclave.perception.vision.scene.Florence2ForConditionalGeneration")
-    @patch("conclave.perception.vision.scene.AutoProcessor")
+    @patch("conclave.perception.vision.scene.BlipForConditionalGeneration")
+    @patch("conclave.perception.vision.scene.BlipProcessor")
     @patch("conclave.perception.vision.scene.SiglipVisionModel")
     @patch("conclave.perception.vision.scene.SiglipProcessor")
     @patch("conclave.perception.vision.scene.YOLO")
@@ -20,7 +20,7 @@ class TestModelMigration(unittest.TestCase):
         processor = SceneProcessor(self.config)
         self.assertTrue(hasattr(processor, "vlm_model"))
         self.assertTrue(hasattr(processor, "_run_vlm_caption_sequential"))
-        print("\n[Passed] SceneProcessor initialized with Florence-2.")
+        print("\n[Passed] SceneProcessor initialized with BLIP.")
 
     @patch("conclave.perception.audio.voice.torch.hub.load")
     @patch("conclave.perception.audio.voice.EncoderClassifier")

@@ -42,7 +42,7 @@ class ConclaveQuerier:
         self.engine = ConclaveEngine(video_id=video_id, config_path=config_path)
         
         # We need the embedder to turn the question into a vector
-        self.embedder = EmbeddingService(self.config["text-embedding-3-large"])
+        self.embedder = EmbeddingService(self.config["text-embedding-3-small"])
         
         # LLM Client
         api_key = self.config["api"].get("openai_api_key") or self.config["api"].get("api_key")
@@ -223,16 +223,41 @@ Constraint: Use specific entity IDs (e.g., face_1, voice_2) in searches if known
             elif "[SEARCH]" in raw_output:
                 # Extraction logic for queries
                 # M3 often outputs: [SEARCH] ["query1", "query2"]
+                search_part = raw_output.split("[SEARCH]", 1)[1].strip()
+                
+                # Attempt robust parsing
+                queries = []
                 try:
-                    search_part = raw_output.split("[SEARCH]")[1].strip()
-                    # Safe eval to parse python list string
-                    queries = ast.literal_eval(search_part)
-                    if isinstance(queries, str): queries = [queries] # Handle single query case
-                except:
-                    # Fallback if LLM outputs plain text
-                    queries = [raw_output.split("[SEARCH]")[1].strip()]
+                    # 1. Try to find a JSON-like list in the text
+                    import re
+                    json_match = re.search(r'\[\s*".*?"\s*(?:,\s*".*?"\s*)*\]', search_part, re.DOTALL)
+                    if json_match:
+                        queries = ast.literal_eval(json_match.group(0))
+                    else:
+                        # 2. Try literal_eval of the whole part
+                        queries = ast.literal_eval(search_part)
+                except Exception:
+                    # 3. Fallback: Split by lines if it looks like a list
+                    lines = [l.strip("-*•123456789. ") for l in search_part.splitlines() if l.strip()]
+                    queries = [l for l in lines if l]
+                
+                # Final cleanup
+                if isinstance(queries, str):
+                    queries = [queries]
+                elif not isinstance(queries, list):
+                    queries = [str(queries)]
+                
+                # Filter out any non-string items or empty strings
+                queries = [q for q in queries if isinstance(q, str) and q.strip()]
+                
+                if not queries:
+                    # Last ditch fallback: use the first line of search_part
+                    first_line = search_part.splitlines()[0].strip() if search_part else ""
+                    if first_line:
+                        queries = [first_line]
 
                 print(f"🔍 Step {step+1} Searching: {queries}")
+
 
                 # Execute Searches
                 new_info = []
@@ -336,6 +361,7 @@ if __name__ == "__main__":
     parser.add_argument("--query", type=str, required=True, help="Your question about the video")
     parser.add_argument("--video_id", type=str, required=True, help="The ID used during processing")
     parser.add_argument("--config", type=str, default="configs/api_config.json")
+    parser.add_argument("--iterative", action="store_true", help="Enable M3 iterative reasoning loop")
     
     args = parser.parse_args()
     
@@ -346,8 +372,13 @@ if __name__ == "__main__":
 
     querier = ConclaveQuerier(args.config, args.video_id)
     
-    # 1. Retrieve
-    knowledge = querier.retrieve_knowledge(args.query)
-    
-    # 2. Answer
-    querier.generate_answer(args.query, knowledge)
+    if args.iterative:
+        # Run iterative M3 control loop
+        querier.execute_m3_control_loop(args.query)
+    else:
+        # Standard flow
+        # 1. Retrieve
+        knowledge = querier.retrieve_knowledge(args.query)
+        
+        # 2. Answer
+        querier.generate_answer(args.query, knowledge)

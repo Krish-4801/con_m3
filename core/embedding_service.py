@@ -50,10 +50,41 @@ class EmbeddingService:
         if not texts:
             return []
 
-        all_embeddings = []
-        for i in range(0, len(texts), self.batch_size):
-            batch = texts[i : i + self.batch_size]
+        # Filter out empty strings or non-strings which cause API errors
+        valid_texts = []
+        original_indices = []
+        for i, t in enumerate(texts):
+            if isinstance(t, str) and t.strip():
+                valid_texts.append(t)
+                original_indices.append(i)
+            else:
+                logger.warning(f"Skipping invalid embedding input at index {i}: {repr(t)}")
+        
+        if not valid_texts:
+            # Default to 1536 (common for OpenAI) if we can't determine dimension
+            dim = 1536
+            if "large" in self.model: dim = 3072
+            return [[0.0] * dim for _ in range(len(texts))]
+
+
+        all_embeddings_map = {}
+        for i in range(0, len(valid_texts), self.batch_size):
+            batch = valid_texts[i : i + self.batch_size]
+            batch_indices = original_indices[i : i + self.batch_size]
             batch_embeddings = self._get_embeddings_with_backoff(batch)
-            all_embeddings.extend(batch_embeddings)
             
-        return all_embeddings
+            for idx, emb in zip(batch_indices, batch_embeddings):
+                all_embeddings_map[idx] = emb
+        
+        # Reconstruct full list in original order, filling gaps with zero vectors
+        first_emb = next(iter(all_embeddings_map.values()), None)
+        dim = len(first_emb) if first_emb else 1536
+        
+        final_results = []
+        for i in range(len(texts)):
+            if i in all_embeddings_map:
+                final_results.append(all_embeddings_map[i])
+            else:
+                final_results.append([0.0] * dim)
+            
+        return final_results
