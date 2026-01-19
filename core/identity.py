@@ -170,9 +170,10 @@ class IdentityManager:
 
     def merge_identities(self, source_id: str, target_id: str, video_id: str):
         """
-        🔥 UNIFIED DEEP MERGE (merged from IdentityResolver.deep_merge_entities)
+        🔥 UNIFIED DEEP MERGE
         Step 3: Safe Merge (The "Deep Refactor").
         Re-tags all historical vectors and refactors the Graph.
+        Uses Async Graph Writes to prevent blocking the perception loop.
         
         Args:
             source_id: The primary/canonical entity ID to keep
@@ -184,16 +185,7 @@ class IdentityManager:
 
         logger.warning(f"🔄 DEEP MERGE INITIATED: Unifying {target_id} into {source_id}")
 
-        # 1. Graph Refactor (Neo4j) - Move all relationships
-    def merge_identities(self, source_id: str, target_id: str, video_id: str):
-        """
-        Step 3: Safe Merge (The "Deep Refactor").
-        Uses Async Graph Writes to prevent blocking the perception loop.
-        """
-        if source_id == target_id:
-            return
-
-        logger.warning(f"Identity Merger: Unifying {target_id} into {source_id}")
+        # 1. Update Graph Relationships (Neo4j) - ASYNC
 
         # 1. Update Graph Relationships (Neo4j) - ASYNC NOW
         merge_query = """

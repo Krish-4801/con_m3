@@ -30,7 +30,10 @@ def init_conclave():
         # 1. Video ID (for filtering by session)
         qc.create_payload_index(name, "video_id", models.PayloadSchemaType.KEYWORD)
         
-        # 2. Entity ID (for Identity Merging) <-- THIS WAS MISSING
+        # 2. Type (for filtering Episodic vs Semantic vs Identity)
+        qc.create_payload_index(name, "type", models.PayloadSchemaType.KEYWORD)
+        
+        # 3. Entity ID (for Identity Merging)
         if name in ["face_memories", "voice_memories"]:
             qc.create_payload_index(name, "entity_id", models.PayloadSchemaType.KEYWORD)
             

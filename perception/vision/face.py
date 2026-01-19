@@ -28,11 +28,6 @@ class FaceProcessor:
 
         # 2. Recognition: InceptionResnetV1
         self.resnet = InceptionResnetV1(pretrained='vggface2').eval().to(self.device)
-        
-        if hasattr(torch, 'compile'):
-            try:
-                self.resnet = torch.compile(self.resnet)
-            except: pass
 
     def extract_from_frames(self, frames: List[Union[str, np.ndarray]], video_id: str, clip_id: int) -> List[FaceObservation]:
         raw_observations = []

@@ -4,6 +4,8 @@ import json
 import logging
 import argparse
 import torch
+import torch._dynamo
+torch._dynamo.config.suppress_errors = True
 import numpy as np
 import concurrent.futures
 import queue
@@ -84,7 +86,7 @@ class ConclaveOrchestrator:
 
     def _load_scene_model(self):
         from conclave.perception.vision.scene import SceneProcessor
-        logger.info("-> Loading SceneProcessor (Gemini API)...")
+        logger.info("-> Loading SceneProcessor (Florence-2-Base)...")
         
         # Start with processing config
         process_config = self.config.get("processing", {}).copy()
@@ -171,11 +173,25 @@ class ConclaveOrchestrator:
                     self.identity_manager.register_observation(v)
 
                 # --- REASONING ---
-                episodes = self.reasoning_agent.generate_episodic_memory(
+                # UPDATED: Use M3 unified memory generation
+                memories = self.reasoning_agent.generate_memory_structures(
                     self.video_id, clip_id, visuals, faces, voices
                 )
-                if episodes:
-                    self.engine.add_memories_batched(episodes)
+                
+                if memories:
+                    # Split memories by type for correct handling in Engine
+                    from core.schemas import MemoryType
+                    
+                    episodic = [m for m in memories if m.mem_type == MemoryType.EPISODIC]
+                    semantic = [m for m in memories if m.mem_type == MemoryType.SEMANTIC]
+                    
+                    # 1. Episodic: Standard batched ingestion
+                    if episodic:
+                        self.engine.add_memories_batched(episodic)
+                    
+                    # 2. Semantic: Weighted reinforcement (M3 Logic)
+                    if semantic:
+                        self.engine.add_memories_m3_style(semantic)
 
                 if clip_id % 2 == 0: 
                     self.identity_manager.link_modalities(self.video_id)

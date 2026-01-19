@@ -115,7 +115,7 @@ class GraphStore:
         query = """
         MATCH (c:Clip {id: $clip_id, video_id: $video_id})
         MERGE (m:Memory {id: $mem_id})
-        ON CREATE SET m.content = $content, m.type = $mem_type, m.video_id = $video_id
+        ON CREATE SET m.content = $content, m.type = $mem_type, m.video_id = $video_id, m.weight = 1.0
         MERGE (c)-[:HAS_MEMORY]->(m)
         """
         self.write_queue.put((query, {
@@ -123,12 +123,29 @@ class GraphStore:
             "video_id": video_id, "clip_id": clip_id
         }))
 
-    def link_memory_to_entity(self, mem_id: str, entity_id: str):
-        """Links a Memory (text) to an Entity (Face/Voice/Character)."""
+    def reinforce_node(self, mem_id: str, delta: float = 1.0):
+        """M3 Logic: Increases the importance (weight) of a semantic node."""
         query = """
         MATCH (m:Memory {id: $mem_id})
-        MATCH (e:Entity {id: $entity_id})
-        MERGE (m)-[:MENTIONS]->(e)
+        SET m.weight = coalesce(m.weight, 1.0) + $delta
+        """
+        self.write_queue.put((query, {"mem_id": mem_id, "delta": delta}))
+
+    def create_clip_structure(self, video_id: str, clip_id: int):
+        """Ensures the Video and Clip nodes exist (Idempotent)."""
+        query = """
+        MERGE (v:Video {id: $video_id})
+        MERGE (c:Clip {id: $clip_id, video_id: $video_id})
+        MERGE (v)-[:HAS_CLIP]->(c)
+        """
+        self.write_queue.put((query, {"video_id": video_id, "clip_id": clip_id}))
+
+    def link_memory_to_entity(self, mem_id: str, entity_id: str, rel_type: str = "MENTIONS"):
+        """Links a Memory (text) to an Entity (Face/Voice/Character)."""
+        query = f"""
+        MATCH (m:Memory {{id: $mem_id}})
+        MATCH (e:Entity {{id: $entity_id}})
+        MERGE (m)-[:{rel_type}]->(e)
         """
         self.write_queue.put((query, {"mem_id": mem_id, "entity_id": entity_id}))
 
