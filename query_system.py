@@ -83,6 +83,7 @@ class ConclaveQuerier:
         data = result[0]
         return {
             "source": f"Direct Lookup CLIP_{clip_id}",
+            "clip_id": clip_id,
             "memories": data['memories'],
             "entities_present": [e['id'] for e in data['entities']]
         }
@@ -313,8 +314,8 @@ class ConclaveQuerier:
                         for r in results:
                             knowledge_context.append({
                                 "query": q,
-                                "memory": r["memory_text"],
-                                "related_entities": r["entities"],
+                                "memory_text": r["memory_text"],
+                                "entities": r["entities"],
                                 "clip_id": r["clip_id"]
                             })
 
@@ -329,7 +330,8 @@ class ConclaveQuerier:
                 print("⚠️ Unrecognized action pattern. Retrying...")
                 knowledge_context.append({"system_note": "Invalid output format. Please use [SEARCH] or [ANSWER]."})
 
-        print("❌ Max steps reached without answer.")
+        print("⚠️ Max steps reached. Attempting final synthesis with gathered context...")
+        return self.generate_answer(question, knowledge_context)
 
     def generate_answer(self, user_query: str, context: List[Dict[str, Any]]):
         """
@@ -341,13 +343,28 @@ class ConclaveQuerier:
 
         # Format context for the LLM
         context_str = ""
-        for item in sorted(context, key=lambda x: x.get('clip_id') or -1):
-            clip_info = f"[Clip ID: {item['clip_id']}]" if item.get('clip_id') is not None else "[Global Memory]"
-            text = item.get('memory_text', '')
-            entities = item.get('entities', [])
+        # Sort by clip_id, putting Global Memory (-1) first or last? 
+        # Usually chronological is better, so -1 first.
+        sorted_context = sorted(context, key=lambda x: (x.get('clip_id') if x.get('clip_id') is not None else -1))
+        
+        for item in sorted_context:
+            if "system_note" in item:
+                context_str += f"[System Note]: {item['system_note']}\n"
+                continue
+                
+            clip_id = item.get('clip_id')
+            clip_info = f"[Clip ID: {clip_id}]" if clip_id is not None else "[Global Memory]"
             
+            # Robust mapping for different context sources
+            text = item.get('memory_text') or item.get('memory')
+            if not text and 'memories' in item:
+                text = "\n".join(item['memories']) if isinstance(item['memories'], list) else item['memories']
+            
+            entities = item.get('entities') or item.get('related_entities') or item.get('entities_present') or []
+            source = item.get('query') or item.get('source') or "Search Result"
+
             context_str += f"""
-            {clip_info}
+            {clip_info} ({source})
             Description: {text}
             Related Entities: {entities}
             ------------------------------------------------

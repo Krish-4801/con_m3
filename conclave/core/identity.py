@@ -148,20 +148,16 @@ class IdentityManager:
 
         col = self.collections["face"] if isinstance(obs, FaceObservation) else self.collections["voice"]
         
-        # 1. Update Graph (Idempotent MERGE)
-        query = """
-        MATCH (c:Clip {id: $clip_id, video_id: $video_id})
-        MATCH (e:Entity {id: $entity_id})
-        MERGE (e)-[r:APPEARED_IN {obs_id: $obs_id}]->(c)
-        ON CREATE SET r.ts_ms = $ts
-        """
-        self.graph_store.run_query(query, {
-            "clip_id": obs.clip_id,
-            "video_id": obs.video_id,
-            "entity_id": obs.entity_id,
-            "obs_id": obs.obs_id,
-            "ts": obs.ts_ms
-        })
+        # 1. Update Graph (Async Write via Queue)
+        # We use the GraphStore's specialized method which puts this in the write_queue.
+        # This ensures it runs AFTER the node creation tasks pushed by engine.ingest_face().
+        self.graph_store.create_appearance_link(
+            entity_id=obs.entity_id,
+            clip_id=obs.clip_id,
+            video_id=obs.video_id,
+            ts_ms=obs.ts_ms,
+            obs_id=obs.obs_id
+        )
 
         # 2. Update Vector Store (Idempotent)
         payload = {
@@ -190,23 +186,23 @@ class IdentityManager:
 
         logger.warning(f"🔄 DEEP MERGE INITIATED: Unifying {target_id} into {source_id}")
 
-        # 1. Update Graph Relationships (Neo4j) - ASYNC
-
         # 1. Update Graph Relationships (Neo4j) - ASYNC NOW
         merge_query = """
-        MATCH (primary:Entity {id: $source_id}), (secondary:Entity {id: $target_id})
+        MATCH (primary:Entity {id: $source_id})
+        MATCH (secondary:Entity {id: $target_id})
+        
         OPTIONAL MATCH (secondary)-[r:APPEARED_IN]->(c:Clip)
-        WITH primary, secondary, r, c
-        WHERE r IS NOT NULL
-        MERGE (primary)-[new_r:APPEARED_IN {obs_id: r.obs_id}]->(c)
-        ON CREATE SET new_r.ts_ms = r.ts_ms
+        FOREACH (x IN CASE WHEN r IS NOT NULL THEN [1] ELSE [] END |
+            MERGE (primary)-[new_r:APPEARED_IN {obs_id: r.obs_id}]->(c)
+            ON CREATE SET new_r.ts_ms = r.ts_ms
+        )
+        
+        // Relink Memories
         WITH primary, secondary
         OPTIONAL MATCH (m:Memory)-[r2:MENTIONS]->(secondary)
-        WITH primary, secondary, m
-        WHERE m IS NOT NULL
-        MERGE (m)-[:MENTIONS]->(primary)
-        WITH secondary
-        // DETACH DELETE secondary  <-- M3 Alignment: Stop destroying nodes
+        FOREACH (x IN CASE WHEN m IS NOT NULL THEN [1] ELSE [] END |
+            MERGE (m)-[:MENTIONS]->(primary)
+        )
         """
         # 🔥 FIX: Use execute_async
         self.graph_store.execute_async(merge_query, {
