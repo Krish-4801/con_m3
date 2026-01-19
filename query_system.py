@@ -46,7 +46,7 @@ class ConclaveQuerier:
         
         # LLM Client
         api_conf = self.config.get("api", {})
-        self.model = api_conf.get("model", "gpt-4o")
+        self.model = api_conf.get("model", "gemini-3-flash-preview")
         
         if "gemini" in self.model.lower():
             api_key = api_conf.get("gemini_api_key")

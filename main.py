@@ -86,7 +86,7 @@ class ConclaveOrchestrator:
 
     def _load_scene_model(self):
         from conclave.perception.vision.scene import SceneProcessor
-        logger.info("-> Loading SceneProcessor (Florence-2-Base)...")
+        logger.info("-> Loading SceneProcessor (YOLO + SigLIP + Gemini)...")
         
         # Start with processing config
         process_config = self.config.get("processing", {}).copy()
@@ -180,7 +180,7 @@ class ConclaveOrchestrator:
                 
                 if memories:
                     # Split memories by type for correct handling in Engine
-                    from core.schemas import MemoryType
+                    from conclave.core.schemas import MemoryType
                     
                     episodic = [m for m in memories if m.mem_type == MemoryType.EPISODIC]
                     semantic = [m for m in memories if m.mem_type == MemoryType.SEMANTIC]

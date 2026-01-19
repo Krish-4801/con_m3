@@ -4,7 +4,7 @@ import re
 from typing import List, Dict, Any, Tuple
 import openai
 
-from core.schemas import (
+from conclave.core.schemas import (
     FaceObservation,
     VoiceObservation,
     VisualObservation,
@@ -22,7 +22,7 @@ class ReasoningAgent:
     """
 
     def __init__(self, config: Dict[str, Any]):
-        self.model = config.get("model", "gpt-4o")
+        self.model = config.get("model", "gemini-3-flash-preview")
         
         if "gemini" in self.model.lower():
             api_key = config.get("gemini_api_key")
@@ -44,40 +44,46 @@ class ReasoningAgent:
         voices: List[VoiceObservation],
     ) -> str:
         """
-        Formats raw perceptions into the specific layout M3-Agent expects.
-        Explicitly maps IDs to descriptions to help the LLM link them.
+        Formats raw perceptions into a "Screenplay" format for the LLM.
+        Aggregates raw timestamps into availability lists to prevent "log-style" outputs.
         """
         context_blocks = []
 
-        # 1. Visual Context (Scene Description)
-        if visuals:
-            # Use the most representative visual description (middle of clip)
-            mid_v = visuals[len(visuals)//2]
-            spatial = getattr(mid_v, "spatial_metadata", {})
-            desc = spatial.get("dense_description", "A video clip.")
-            ocr = ", ".join([t["text"] for t in mid_v.ocr_tokens]) if mid_v.ocr_tokens else "None"
-            context_blocks.append(f"### Visual Scene:\n{desc}\nVisible Text: {ocr}")
+        # 1. Visual Context (The Stage)
+        # Aggregate unique descriptions to avoid repetition
+        descriptions = []
+        ocr_texts = []
+        for v in visuals:
+            spatial = getattr(v, "spatial_metadata", {})
+            desc = spatial.get("dense_description")
+            if desc: descriptions.append(desc)
+            if v.ocr_tokens:
+                ocr_texts.extend([t["text"] for t in v.ocr_tokens])
+        
+        # Deduplicate descriptions loosely
+        unique_desc = list(set(descriptions))
+        scene_summary = " ".join(unique_desc[:3]) # Take top 3 unique descriptions
+        unique_ocr = ", ".join(list(set(ocr_texts)))
 
-        # 2. Face Features (List available tags)
+        context_blocks.append(f"### Visual Scene Summary:\n{scene_summary}")
+        if unique_ocr:
+            context_blocks.append(f"### Visible Text/Slides:\n{unique_ocr}")
+
+        # 2. Face Context (The Cast)
+        # We only list WHO is present, not every millisecond they were seen.
         if faces:
-            context_blocks.append("### Detected Faces (Visual Entities):")
-            # Group by resolved Entity ID
-            seen_entities = set()
-            for f in faces:
-                if f.entity_id and f.entity_id not in seen_entities:
-                    seen_entities.add(f.entity_id)
-                    # Note: In a real M3 implementation, we would describe the face's appearance
-                    # (e.g., "Man with glasses"). Here we rely on the vector ID.
-                    context_blocks.append(f"- Entity Tag: <{f.entity_id}> (Visible at {f.ts_ms}ms)")
+            unique_entities = sorted(list(set([f.entity_id for f in faces if f.entity_id])))
+            cast_list = ", ".join([f"<{uid}>" for uid in unique_entities])
+            context_blocks.append(f"### Cast (Visual Entities Present):\n{cast_list}")
 
-        # 3. Voice Features (List available tags + Transcripts)
+        # 3. Voice Context (The Script)
+        # We provide the transcript with timestamps to help ground the narrative.
         if voices:
-            context_blocks.append("### Detected Voices (Audio Entities):")
+            context_blocks.append("### Audio Transcript:")
             for v in voices:
-                if v.entity_id:
+                if v.entity_id and len(v.asr_text) > 2: # Filter empty noise
                     context_blocks.append(
-                        f"- Entity Tag: <{v.entity_id}>\n"
-                        f"  Transcript: '{v.asr_text}' (Time: {v.start_sec}-{v.end_sec}s)"
+                        f"- <{v.entity_id}> ({v.start_sec:.1f}s): \"{v.asr_text}\""
                     )
 
         return "\n\n".join(context_blocks)
@@ -96,39 +102,41 @@ class ReasoningAgent:
     ) -> List[MemoryNode]:
         """
         Generates BOTH Episodic (Event) and Semantic (Equivalence) memories in one pass.
-        This mirrors M3's `generate_all_memories` function.
         """
         
         # 1. Build Context
         context_str = self._prepare_m3_context(visuals, faces, voices)
         
         # 2. M3 System Prompt
-        # Key instruction: "Equivalence: <face_x> is <voice_y>"
+        # Updated to explicitly forbid "was visible" logging style.
         system_prompt = """
         You are the M3-Agent Multimodal Reasoning Engine.
-        Your goal is to turn raw perception data into structured memory.
-        
+        Your goal is to synthesize distinct perceptions (Visual Scene, Faces, Audio) into a cohesive narrative.
+
         INPUT DATA:
-        - Visual Scene: Description of the environment.
-        - Faces: List of <face_uuid> entities present.
-        - Voices: List of <voice_uuid> entities and what they said.
+        - Visual Scene: Detailed description of the environment and actions.
+        - Cast: List of <face_uuid> entities present in the video.
+        - Transcript: List of <voice_uuid> entities and what they said.
 
-        TASK:
-        1. **Episodic Memory**: Write a chronological description of what happened. 
-           - YOU MUST USE THE ENTITY TAGS (e.g., <face_...>, <voice_...>) when referring to people.
-           - Example: "<face_a1> entered the room and argued with <face_b2>."
-           - Example: "<voice_c3> said 'Hello' while <face_d4> waved."
-
-        2. **Semantic Memory (Equivalences)**: 
-           - Analyze the timing and context. Does a voice belong to a specific face?
-           - If you are confident, output an equivalence statement.
+        CRITICAL INSTRUCTIONS:
+        1. **NO LOGGING**: Do NOT generate memories like "<face_x> was visible at 400ms" or "<face_y> appeared." These are useless.
+        2. **SYNTHESIS**: Combine the Visual Scene description with the Entity Tags.
+           - BAD: "<face_1> was seen. The scene shows a man at a podium."
+           - GOOD: "<face_1> stood at the podium addressing the audience regarding the conference topics."
+        3. **AUDIO INTEGRATION**: Attribute speech to faces based on context. 
+           - If <voice_1> says "Welcome", and <face_1> is the only person on screen, write: "<face_1> welcomed the audience."
+        
+        OUTPUT TASKS:
+        1. **Episodic Memory**: A rich, chronological story of the clip. Describe actions, emotions, and specific speech topics.
+        2. **Semantic Memory**: High-level facts derived from the clip (e.g., "The event is the 2026 Esper Conference").
+        3. **Equivalences**: If you are confident a voice belongs to a face, output an equivalence statement.
            - Format: "Equivalence: <face_uuid> is <voice_uuid>"
-           - Format: "Equivalence: <face_uuid> is the same as <face_uuid>" (if visual appearance matches context).
 
         OUTPUT FORMAT (JSON):
         {
-            "episodic": ["string", "string"],
-            "semantic": ["string", "string"]
+            "episodic": ["string (narrative sentence)", "string"],
+            "semantic": ["string (fact)", "string"],
+            "equivalences": ["string"]
         }
         """
 
@@ -168,6 +176,16 @@ class ReasoningAgent:
                     mem_type=MemoryType.SEMANTIC,
                     linked_entities=self._extract_tags(text)
                 ))
+            
+            # 6. Process Equivalences (Explicitly add as Semantic nodes for graph logic)
+            for text in parsed.get("equivalences", []):
+                memories.append(MemoryNode(
+                    video_id=video_id,
+                    clip_id=clip_id,
+                    content=text,
+                    mem_type=MemoryType.SEMANTIC,
+                    linked_entities=self._extract_tags(text)
+                ))
 
             return memories
 
@@ -189,6 +207,4 @@ class ReasoningAgent:
         M3 feature: Summarize multiple clips to find long-range equivalences 
         or plot points.
         """
-        # Implementation would gather recent text nodes and ask LLM for summary.
-        # Keeping it simple for now to focus on the Identity Logic.
         return []

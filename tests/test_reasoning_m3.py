@@ -8,11 +8,12 @@ import sys
 import os
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from core.schemas import (
+from conclave.core.schemas import (
     FaceObservation,
     VoiceObservation,
     VisualObservation,
     MemoryType,
+    MemoryNode
 )
 from conclave.agent.reasoning import ReasoningAgent
 
@@ -51,13 +52,13 @@ class TestReasoningAgent(unittest.TestCase):
         context = self.agent._prepare_m3_context(visuals, faces, voices)
         
         # Assertions
-        self.assertIn("Visual Scene:", context)
+        self.assertIn("Visual Scene Summary:", context)
         self.assertIn("A sunny day in the park.", context)
-        self.assertIn("Detected Faces", context)
+        self.assertIn("Cast (Visual Entities Present):", context)
         self.assertIn("<face_abc>", context)
-        self.assertIn("Detected Voices", context)
+        self.assertIn("Audio Transcript:", context)
         self.assertIn("<voice_xyz>", context)
-        self.assertIn("'Hello world'", context)
+        self.assertIn('"Hello world"', context)
 
     @patch("conclave.agent.reasoning.openai.OpenAI")
     def test_generate_memory_structures(self, mock_openai_cls):

@@ -24,7 +24,7 @@ class SceneProcessor:
         gemini_conf = config.get("gemini", {})
         api_key = gemini_conf.get("api_key")
         base_url = gemini_conf.get("base_url")
-        model = gemini_conf.get("model", "gemini-2.5-flash-lite-preview-02-05")
+        model = gemini_conf.get("model", "gemini-3-flash-preview")
 
         self.client = None
         self.vlm_model_name = model
@@ -50,7 +50,7 @@ class SceneProcessor:
         self.siglip_processor = SiglipProcessor.from_pretrained("google/siglip-base-patch16-224")
         
         # 3. OCR (Local)
-        self.ocr_reader = easyocr.Reader(['en'], gpu=(self.device.type == 'cuda'), verbose=False)
+        self.ocr_reader = easyocr.Reader(['en'], gpu=False, verbose=False)
 
         # 4. YOLO (Local) - With Warmup
         self.yolo_model = YOLO("yolo11n.pt")

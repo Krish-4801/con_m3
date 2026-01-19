@@ -14,6 +14,18 @@ from core.identity import IdentityManager
 
 logger = logging.getLogger("Conclave.Engine")
 
+# --- junk filter patterns ---
+JUNK_PATTERNS = [
+    r"was visible at",
+    r"appeared in the frame",
+    r"detected at",
+    r"at \d+ms",
+    r"confidence:",
+    r"box:",
+    r"\[\d+ms\]",
+    r"^Scene$",
+]
+
 class ConclaveEngine:
     def __init__(self, video_id: str, config_path: str = "configs/api_config.json"):
         with open(config_path) as f:
@@ -80,6 +92,10 @@ class ConclaveEngine:
             "type": mem.mem_type.value,
             "model": self.embedding_service.model
         }
+        if self._is_junk(mem.content):
+            logger.debug(f"🗑️ Skipping junk memory: {mem.content}")
+            return
+
         self.vector_store.upsert(self.collections["text"], mem.mem_id, mem.embedding, payload)
 
     def add_memories_batched(self, memories: List[MemoryNode]):
@@ -94,6 +110,9 @@ class ConclaveEngine:
         texts_to_embed = []
         
         for mem in memories:
+            if self._is_junk(mem.content):
+                continue
+            
             # Generate deterministic ID based on content
             mem.mem_id = self.embedding_service.generate_deterministic_id(mem.content)
             
@@ -258,3 +277,15 @@ class ConclaveEngine:
             })
             
         return results
+    def _is_junk(self, text: str) -> bool:
+        """
+        M3 Quality Control: Rejects memories that are just logs or too short.
+        """
+        if not text or len(text.strip()) < 10:
+            return True
+            
+        import re
+        for pattern in JUNK_PATTERNS:
+            if re.search(pattern, text, re.IGNORECASE):
+                return True
+        return False
