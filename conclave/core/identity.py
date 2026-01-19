@@ -382,6 +382,29 @@ class IdentityManager:
                 
         logger.info(f"M3 Equivalences: Mapped {len(self.character_mappings)} characters.")
 
+    def translate_content(self, text: str) -> str:
+        """
+        M3 Logic: Converts internal IDs (<face_x>, <voice_y>) back to 
+        readable 'Character N' labels for the LLM.
+        """
+        # Ensure mappings are fresh
+        if not self.reverse_character_mappings:
+            logger.warning("Mappings empty, returning raw text.")
+            return text
+
+        import re
+        # Find all tags like <face_...> or <voice_...>
+        pattern = re.compile(r'<((?:ent_)?(?:face|voice)_[a-zA-Z0-9\-]+)>')
+        
+        def replace_match(match):
+            tag = match.group(1)
+            # Return mapped character (e.g., "character_0") or original tag if not found
+            return self.reverse_character_mappings.get(tag, tag)
+
+        # Replace <tag> with character_id
+        translated = pattern.sub(replace_match, text)
+        return translated
+
     def get_entity_stats(self, video_id: str) -> Dict[str, Any]:
         """
         Returns statistics about entities in the current video.
