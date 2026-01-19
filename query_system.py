@@ -45,9 +45,16 @@ class ConclaveQuerier:
         self.embedder = EmbeddingService(self.config["text-embedding-3-small"])
         
         # LLM Client
-        api_key = self.config["api"].get("openai_api_key") or self.config["api"].get("api_key")
-        self.client = openai.OpenAI(api_key=api_key)
-        self.model = self.config["api"].get("model", "gpt-4o")
+        api_conf = self.config.get("api", {})
+        self.model = api_conf.get("model", "gpt-4o")
+        
+        if "gemini" in self.model.lower():
+            api_key = api_conf.get("gemini_api_key")
+            base_url = api_conf.get("gemini_base_url")
+            self.client = openai.OpenAI(api_key=api_key, base_url=base_url)
+        else:
+            api_key = api_conf.get("openai_api_key") or api_conf.get("api_key")
+            self.client = openai.OpenAI(api_key=api_key)
 
     def retrieve_knowledge(self, query_text: str, top_k: int = 10) -> List[Dict[str, Any]]:
         """

@@ -22,9 +22,15 @@ class ReasoningAgent:
     """
 
     def __init__(self, config: Dict[str, Any]):
-        api_key = config.get("openai_api_key") or config.get("api_key")
-        self.client = openai.OpenAI(api_key=api_key)
-        self.model = config.get("model", "gpt-4o") # M3 uses Qwen/GPT-4o
+        self.model = config.get("model", "gpt-4o")
+        
+        if "gemini" in self.model.lower():
+            api_key = config.get("gemini_api_key")
+            base_url = config.get("gemini_base_url")
+            self.client = openai.OpenAI(api_key=api_key, base_url=base_url)
+        else:
+            api_key = config.get("openai_api_key") or config.get("api_key")
+            self.client = openai.OpenAI(api_key=api_key)
         self.max_retries = 3
 
     # ------------------------------------------------------------------

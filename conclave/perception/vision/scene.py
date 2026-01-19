@@ -13,6 +13,9 @@ from transformers import (
     SiglipProcessor
 )
 import easyocr
+import base64
+import concurrent.futures
+import openai
 from conclave.core.schemas import VisualObservation
 
 logger = logging.getLogger("Conclave.Vision.Scene")
@@ -22,26 +25,77 @@ class SceneProcessor:
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.torch_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
 
+        # 1. SETUP GEMINI API
+        gemini_conf = config.get("gemini", {})
+        api_key = gemini_conf.get("api_key")
+        base_url = gemini_conf.get("base_url")
+        model = gemini_conf.get("model", "gemini-1.5-flash")
+
+        self.gemini_client = None
+        self.vlm_model_name = model
+        
+        if api_key and base_url:
+            logger.info(f"🌐 Connecting to Gemini API for Scene Captioning: {model}")
+            self.gemini_client = openai.OpenAI(
+                base_url=base_url,
+                api_key=api_key,
+                timeout=15.0
+            )
+        else:
+            logger.warning("⚠️ Gemini API credentials missing. Falling back to local BLIP.")
+
         logger.info(f"Loading Scene Models (BLIP + SigLIP + YOLO) on {self.device}...")
 
-        # 1. SigLIP Base (For Embeddings)
+        # 2. SigLIP Base (For Embeddings)
         self.siglip_model = SiglipVisionModel.from_pretrained(
             "google/siglip-base-patch16-224"
         ).to(self.device, dtype=self.torch_dtype).eval()
         self.siglip_processor = SiglipProcessor.from_pretrained("google/siglip-base-patch16-224")
 
-        # 2. BLIP Base (For Detailed Captioning)
+        # 3. BLIP Base (Fallback For Detailed Captioning)
         self.vlm_model = BlipForConditionalGeneration.from_pretrained(
             "Salesforce/blip-image-captioning-base"
         ).to(self.device, dtype=self.torch_dtype).eval()
         
         self.vlm_processor = BlipProcessor.from_pretrained("Salesforce/blip-image-captioning-base")
 
-        # 3. YOLO11n (For Object Detection)
+        # 4. YOLO11n (For Object Detection)
         self.yolo_model = YOLO("yolo11n.pt") 
 
-        # 4. EasyOCR (For Text)
+        # 5. EasyOCR (For Text)
         self.ocr_reader = easyocr.Reader(['en'], gpu=(self.device.type == 'cuda'), verbose=False)
+
+    def _encode_image(self, image_np: np.ndarray) -> str:
+        h, w = image_np.shape[:2]
+        # Resize if too big (speed optimization for API upload)
+        if max(h, w) > 720:
+            scale = 720 / max(h, w)
+            image_np = cv2.resize(image_np, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
+        
+        _, buffer = cv2.imencode('.jpg', image_np, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
+        return base64.b64encode(buffer).decode('utf-8')
+
+    def _get_caption_gemini(self, img_np: np.ndarray) -> str:
+        if not self.gemini_client: return None
+        try:
+            b64 = self._encode_image(img_np)
+            resp = self.gemini_client.chat.completions.create(
+                model=self.vlm_model_name,
+                messages=[{
+                    "role": "user", 
+                    "content": [
+                        {"type": "text", "text": "Describe this video frame concisely in one sentence. Focus on key actions and people."},
+                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}
+                    ]
+                }],
+                max_tokens=200
+            )
+            if resp.choices:
+                return resp.choices[0].message.content.strip()
+            return None
+        except Exception as e:
+            logger.warning(f"Gemini API Error: {e}")
+            return None
 
     @torch.no_grad()
     def _get_siglip_embedding_batch(self, pil_imgs: List[Image.Image]) -> List[List[float]]:
@@ -85,9 +139,23 @@ class SceneProcessor:
         # 1. Embeddings (SigLIP - Batched)
         visual_vecs = self._get_siglip_embedding_batch(pil_imgs)
         
-        # 2. Captions (BLIP)
-        # Limit max_new_tokens to 128 for detailed descriptions
-        captions = self._run_vlm_caption_sequential(pil_imgs, max_tokens=128)
+        # 2. Captions (Gemini with BLIP fallback)
+        if self.gemini_client:
+            # Send requests in parallel to avoid blocking
+            with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+                captions = list(executor.map(self._get_caption_gemini, frames_np))
+            
+            # For any failed Gemini requests, fallback to BLIP
+            failed_indices = [i for i, c in enumerate(captions) if c is None]
+            if failed_indices:
+                logger.info(f"Fallback: Running BLIP for {len(failed_indices)} frames.")
+                fallback_imgs = [pil_imgs[i] for i in failed_indices]
+                fallback_captions = self._run_vlm_caption_sequential(fallback_imgs, max_tokens=128)
+                for i, idx in enumerate(failed_indices):
+                    captions[idx] = fallback_captions[i]
+        else:
+            # Standard local BLIP flow
+            captions = self._run_vlm_caption_sequential(pil_imgs, max_tokens=128)
         
         # 3. Object Detection (YOLO)
         yolo_results = self.yolo_model(frames_np, verbose=False, stream=False) 
