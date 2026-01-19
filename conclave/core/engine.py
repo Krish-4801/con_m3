@@ -10,7 +10,7 @@ from conclave.core.schemas import (
 from conclave.core.vector_store import VectorStore
 from conclave.core.graph_store import GraphStore
 from conclave.core.embedding_service import EmbeddingService
-from core.identity import IdentityManager
+from conclave.core.identity import IdentityManager
 
 logger = logging.getLogger("Conclave.Engine")
 
@@ -90,7 +90,8 @@ class ConclaveEngine:
             "clip_id": mem.clip_id,
             "content": mem.content,
             "type": mem.mem_type.value,
-            "model": self.embedding_service.model
+            "model": self.embedding_service.model,
+            "entities": mem.linked_entities
         }
         if self._is_junk(mem.content):
             logger.debug(f"🗑️ Skipping junk memory: {mem.content}")
@@ -139,7 +140,8 @@ class ConclaveEngine:
                 "clip_id": node.clip_id,
                 "content": node.content,
                 "type": node.mem_type.value,
-                "model": self.embedding_service.model
+                "model": self.embedding_service.model,
+                "entities": node.linked_entities
             }
             qdrant_points.append(models.PointStruct(id=node.mem_id, vector=emb, payload=payload))
             
@@ -180,30 +182,18 @@ class ConclaveEngine:
         Main entry point for M3 data ingestion.
         """
         # 1. Handle Equivalences (Merge Entities)
-        # This handles the "Equivalence: <face_1>, <voice_2>" logic
-        # You'll need to call your IdentityManager here via main.py usually, 
-        # or pass the strings back up. For now, we assume the strings are passed up.
-        # (Left as a no-op placeholder for integration with IdentityManager.)
-        # 1. Handle Equivalences (Merge Entities)
-        # Replaces placeholder with actual IdentityManager logic
         eqs = memory_data.get("equivalences", [])
         if eqs:
             logger.info(f"Processing {len(eqs)} equivalence statements")
             id_manager = IdentityManager(self.vector_store, self.graph_store, self.api_config)
             
             for eq_text in eqs:
-                # Expecting format "Equivalence: <src> is <target>" or similar
-                # Just extract tags: if 2 tags found, merge them.
-                # Using regex from reasoning agent logic (local impl here for simplicity)
                 import re
                 pattern = r'<((?:ent_)?(?:face|voice)_[a-zA-Z0-9\-]+)>'
                 tags = list(set(re.findall(pattern, eq_text)))
                 
                 if len(tags) == 2:
                     logger.info(f"Applying equivalence merge: {tags[0]} <-> {tags[1]}")
-                    # Merge smaller into larger or just 1st into 2nd. 
-                    # IdentityManager.merge_identities(source, target) keeps source, deletes target.
-                    # We should probably pick a canonical strategy, but for now simple merge:
                     id_manager.merge_identities(tags[0], tags[1], self.video_id)
 
         # 2. Ingest Episodic (Always new, time-bound)
@@ -214,41 +204,57 @@ class ConclaveEngine:
 
     def _ingest_semantic_weighted(self, memories: List[MemoryNode]):
         """
-        M3-Agent 'process_memories' logic with Graph Reinforcement.
+        Aligned M3-Agent Logic: Reinforce OR Weaken based on vector similarity.
         """
         POSITIVE_THRESHOLD = 0.85
+        NEGATIVE_THRESHOLD = 0.0 # M3 uses 0.0 for weakening
         
         for mem in memories:
-            # Embed content
+            # 1. Embed content
             embedding = self.embedding_service.get_embeddings_batched([mem.content])[0]
 
-            # Search for similar existing thoughts
+            # 2. Find ALL potentially related nodes (not just top 1)
             hits = self.vector_store.search(
                 self.collections["text"], 
                 embedding, 
                 filter_kv={"video_id": self.video_id, "type": "semantic"},
-                limit=1
+                limit=5 # Check top 5 for relationships
             )
 
-            if hits and hits[0].score > POSITIVE_THRESHOLD:
-                existing_id = hits[0].id
-                logger.info(f"♻️ Reinforcing Memory {existing_id} (Score: {hits[0].score:.3f})")
-                
-                # M3 Logic: Increase edge weight in Neo4j
-                # We assume the graph store has a 'reinforce_node' method (see Step 4)
-                # M3 Logic: Increase edge weight in Neo4j
-                # We assume the graph store has a 'reinforce_node' method (see Step 4)
-                self.graph_store.reinforce_node(existing_id, delta=1.0)
+            create_new_node = True
+            
+            for hit in hits:
+                # Calculate precise cosine similarity manually or trust Qdrant score
+                similarity = hit.score 
 
-                # NEW: Ensure entity containment is merged
-                # If the new thought mentions entities not linked to the old thought, link them now.
-                for entity_id in mem.linked_entities:
-                     self.graph_store.link_memory_to_entity(existing_id, entity_id, "MENTIONS")
+                # M3 Logic: Check if entities in new memory are subset of existing node entities
+                existing_entities = hit.payload.get("entities", [])
+                new_entities = mem.linked_entities
                 
-            else:
-                # New thought -> Add to Vector + Graph
+                # Only reinforce/weaken if they talk about the same entities
+                is_subset = all(e in existing_entities for e in new_entities)
+                
+                if is_subset:
+                    if similarity > POSITIVE_THRESHOLD:
+                        logger.info(f"♻️ Reinforcing Memory {hit.id} (Sim: {similarity:.2f})")
+                        self.graph_store.reinforce_node(hit.id, delta=1.0)
+                        
+                        # Also link any *new* entities mentioned in this reinforcement branch
+                        for entity_id in new_entities:
+                            self.graph_store.link_memory_to_entity(hit.id, entity_id, "MENTIONS")
+                            
+                        create_new_node = False
+                        break # Handled
+                    
+                    elif similarity < NEGATIVE_THRESHOLD:
+                        logger.info(f"🔻 Weakening Memory {hit.id} (Sim: {similarity:.2f})")
+                        self.graph_store.reinforce_node(hit.id, delta=-1.0)
+                        # We still create the new node in this case (contradiction)
+                        create_new_node = True
+
+            if create_new_node:
                 mem.embedding = embedding
-                self.add_memory(mem) # Uses the base add_memory logic
+                self.add_memory(mem)
 
     def get_hybrid_context(self, query_vector: List[float], top_k: int = 5):
         """Perform Vector search then expand context via Graph."""
@@ -277,6 +283,7 @@ class ConclaveEngine:
             })
             
         return results
+
     def _is_junk(self, text: str) -> bool:
         """
         M3 Quality Control: Rejects memories that are just logs or too short.

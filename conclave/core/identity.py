@@ -265,6 +265,19 @@ class IdentityManager:
         Advanced Identity Fusion.
         Analyzes Neo4j to find consistent Face-Voice pairings and merges them.
         """
+        # Check if we even have appearance data yet to avoid Neo4j Warning 01N51
+        check_query = """
+        MATCH ()-[r:APPEARED_IN]->() RETURN count(r) as cnt LIMIT 1
+        """
+        try:
+            check = self.graph_store.run_query(check_query)
+            if not check or check[0]['cnt'] == 0:
+                logger.debug("Skipping link_modalities: No APPEARED_IN relationships found yet.")
+                return
+        except Exception:
+            # If the relationship doesn't exist, the query might error or return 0
+            return
+
         query = """
         MATCH (e1:Entity)-[:APPEARED_IN]->(c:Clip {video_id: $video_id})
         MATCH (e2:Entity)-[:APPEARED_IN]->(c)
@@ -359,14 +372,19 @@ class IdentityManager:
             if root not in groups: groups[root] = []
             groups[root].append(tag)
             
-        # Assign "Character_X" IDs
-        for idx, (root, tags) in enumerate(groups.items()):
-            char_id = f"character_{idx}"
+        # Crucial Step: M3 Naming Convention
+        # Sort for deterministic IDs
+        sorted_roots = sorted(list(groups.keys()))
+        
+        for idx, root in enumerate(sorted_roots):
+            char_id = f"character_{idx}" # M3 naming convention
+            tags = groups[root]
+            
             self.character_mappings[char_id] = tags
             for tag in tags:
                 self.reverse_character_mappings[tag] = char_id
                 
-        logger.info(f"✅ Refreshed M3 Equivalences: Found {len(self.character_mappings)} characters.")
+        logger.info(f"M3 Equivalences: Mapped {len(self.character_mappings)} characters.")
 
     def get_entity_stats(self, video_id: str) -> Dict[str, Any]:
         """

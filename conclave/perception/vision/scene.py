@@ -84,7 +84,7 @@ class SceneProcessor:
                         {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}
                     ]
                 }],
-                max_tokens=80
+                max_tokens=500
             )
             if resp.choices:
                 content = resp.choices[0].message.content

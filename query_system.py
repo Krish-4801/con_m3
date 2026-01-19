@@ -9,10 +9,6 @@ from typing import List, Dict, Any, Optional
 
 import openai
 
-# Add parent directory to path for package imports
-project_root = os.path.dirname(os.path.abspath(__file__))
-if project_root not in sys.path:
-    sys.path.insert(0, project_root)
 
 # Import Conclave modules
 from conclave.core.engine import ConclaveEngine
@@ -93,33 +89,39 @@ class ConclaveQuerier:
 
     def back_translate(self, query: str) -> List[str]:
         """
-        M3-Agent Logic: Expands a high-level query into specific modality queries.
-        E.g., "Who is character_0?" -> ["Who is <face_123>?", "Who is <voice_456>?"]
+        M3-Agent Logic: Expands "Character X" into all specific modality tags.
         """
-        # Ensure mappings are fresh
+        # Ensure mappings are fresh from Graph Analysis
         self.identity_manager.refresh_equivalences(self.video_id)
-        mappings = self.identity_manager.character_mappings
+        
+        # M3 stores mappings as: character_0 -> ['face_1', 'voice_2']
+        mappings = self.identity_manager.character_mappings 
         
         expanded_queries = [query]
         
-        # Check if query contains any known character IDs (e.g. character_0)
-        # This regex looks for character_0, character_1, etc.
-        char_matches = re.findall(r'(character_\d+)', query)
+        # 1. Parse entities in the query
+        # We look for "character_X"
+        char_matches = list(set(re.findall(r'(character_\d+)', query)))
+        
+        to_be_translated = [query]
         
         for char_id in char_matches:
             if char_id in mappings:
-                specific_tags = mappings[char_id] # ['face_123', 'voice_456']
+                mapped_tags = mappings[char_id] # e.g. ['face_123', 'voice_456']
                 
                 new_variations = []
-                for base_q in expanded_queries:
-                    for tag in specific_tags:
-                        # Create a variation replacing 'character_X' with '<face_Y>'
+                for tag in mapped_tags:
+                    # Create variants: "Who is character_0" -> "Who is <face_123>"
+                    # M3 format uses angular brackets for specific IDs
+                    for base_q in to_be_translated:
                         new_q = base_q.replace(char_id, f"<{tag}>")
                         new_variations.append(new_q)
                 
-                expanded_queries.extend(new_variations)
+                to_be_translated = new_variations
         
-        return list(set(expanded_queries))
+        # M3 logic specifically adds the translated queries to the list, 
+        # it doesn't just replace them.
+        return list(set(expanded_queries + to_be_translated))
 
     def retrieve_knowledge(self, query_text: str, top_k: int = 5) -> List[Dict[str, Any]]:
         """

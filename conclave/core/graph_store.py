@@ -7,39 +7,36 @@ from neo4j import GraphDatabase
 logger = logging.getLogger("Conclave.GraphStore")
 
 class GraphStore:
-    """
-    Neo4j Backend for M3-Agent Logic.
-    Replaces the in-memory 'VideoGraph' class from ByteDance's implementation.
-    """
     def __init__(self, config: Dict[str, Any]):
         self.driver = GraphDatabase.driver(
             config["uri"], 
             auth=(config["user"], config["password"])
         )
         
-        # 🚀 Async Writer (Non-blocking)
+        # 🚀 Async Writer
         self.write_queue = queue.Queue()
         self.worker_thread = threading.Thread(target=self._async_worker, daemon=True)
         self.worker_thread.start()
         
-        # Initialize Schema Constraints on startup
+        # Initialize Schema Constraints
         self._init_constraints()
 
     def close(self):
         self.write_queue.join()
         self.driver.close()
 
+    def flush(self):
+        """
+        Blocks the main thread until all pending async writes are completed.
+        Call this before running complex read queries (like identity linking).
+        """
+        self.write_queue.join()
+
     def _init_constraints(self):
-        """M3-Specific Schema Constraints"""
         queries = [
-            # Ensure unique IDs for all base types
             "CREATE CONSTRAINT entity_id_unique IF NOT EXISTS FOR (e:Entity) REQUIRE e.id IS UNIQUE",
             "CREATE CONSTRAINT memory_id_unique IF NOT EXISTS FOR (m:Memory) REQUIRE m.id IS UNIQUE",
-            
-            # Index Clip IDs for fast temporal lookup
             "CREATE INDEX clip_lookup IF NOT EXISTS FOR (c:Clip) ON (c.id, c.video_id)",
-            
-            # 🔥 M3 Optimization: Index Memory Types for fast Equivalence search
             "CREATE INDEX memory_type IF NOT EXISTS FOR (m:Memory) ON (m.type)"
         ]
         with self.driver.session() as session:
@@ -61,28 +58,14 @@ class GraphStore:
             finally:
                 self.write_queue.task_done()
 
-    # -------------------------------------------------------------------------
-    # READ METHODS (Synchronous - Needed for Logic)
-    # -------------------------------------------------------------------------
-
+    # --- READ METHODS ---
     def run_query(self, query: str, parameters: Dict[str, Any] = None) -> List[Dict[str, Any]]:
         with self.driver.session() as session:
             return session.run(query, parameters).data()
 
     def get_connected_nodes(self, node_id: str, node_types: List[str] = None) -> List[str]:
-        """
-        🔥 M3 CORE LOGIC PORT: Equivalent to VideoGraph.get_connected_nodes
-        Finds all nodes connected to a given node, optionally filtering by type.
-        Used extensively for Retrieval and Context Generation.
-        """
-        # We look for relationships in both directions:
-        # (Node)-[]-(Target)
-        
         type_filter = ""
         if node_types:
-            # Construct Cypher filter, e.g., "WHERE t.type IN ['episodic', 'semantic']"
-            # Note: In our graph, Faces/Voices are Entities with property 'type', 
-            # Memories are nodes with property 'type'.
             quoted_types = [f"'{t}'" for t in node_types]
             type_filter = f"WHERE t.type IN [{', '.join(quoted_types)}]"
 
@@ -94,16 +77,11 @@ class GraphStore:
         results = self.run_query(query, {"node_id": node_id})
         return [r['id'] for r in results]
 
-    # -------------------------------------------------------------------------
-    # WRITE METHODS (Async / Fire-and-Forget)
-    # -------------------------------------------------------------------------
-
+    # --- WRITE METHODS ---
     def execute_async(self, query: str, parameters: Dict[str, Any] = None):
-        """Generic async write."""
         self.write_queue.put((query, parameters))
 
     def create_entity_node(self, entity_id: str, entity_type: str, video_id: str):
-        """Creates Face, Voice, or Character nodes."""
         query = """
         MERGE (e:Entity {id: $entity_id})
         ON CREATE SET e.type = $type, e.video_id = $video_id
@@ -111,7 +89,6 @@ class GraphStore:
         self.write_queue.put((query, {"entity_id": entity_id, "type": entity_type, "video_id": video_id}))
 
     def create_memory_node(self, mem_id: str, content: str, mem_type: str, video_id: str, clip_id: int):
-        """Creates Episodic or Semantic memory nodes."""
         query = """
         MATCH (c:Clip {id: $clip_id, video_id: $video_id})
         MERGE (m:Memory {id: $mem_id})
@@ -124,7 +101,6 @@ class GraphStore:
         }))
 
     def reinforce_node(self, mem_id: str, delta: float = 1.0):
-        """M3 Logic: Increases the importance (weight) of a semantic node."""
         query = """
         MATCH (m:Memory {id: $mem_id})
         SET m.weight = coalesce(m.weight, 1.0) + $delta
@@ -132,7 +108,6 @@ class GraphStore:
         self.write_queue.put((query, {"mem_id": mem_id, "delta": delta}))
 
     def create_clip_structure(self, video_id: str, clip_id: int):
-        """Ensures the Video and Clip nodes exist (Idempotent)."""
         query = """
         MERGE (v:Video {id: $video_id})
         MERGE (c:Clip {id: $clip_id, video_id: $video_id})
@@ -141,7 +116,6 @@ class GraphStore:
         self.write_queue.put((query, {"video_id": video_id, "clip_id": clip_id}))
 
     def link_memory_to_entity(self, mem_id: str, entity_id: str, rel_type: str = "MENTIONS"):
-        """Links a Memory (text) to an Entity (Face/Voice/Character)."""
         query = f"""
         MATCH (m:Memory {{id: $mem_id}})
         MATCH (e:Entity {{id: $entity_id}})
@@ -150,7 +124,6 @@ class GraphStore:
         self.write_queue.put((query, {"mem_id": mem_id, "entity_id": entity_id}))
 
     def create_appearance_link(self, entity_id: str, clip_id: int, video_id: str, ts_ms: int, obs_id: str):
-        """Links Entity to Clip (Temporal occurrence)."""
         query = """
         MERGE (v:Video {id: $video_id})
         MERGE (c:Clip {id: $clip_id, video_id: $video_id})

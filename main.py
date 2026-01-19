@@ -15,19 +15,6 @@ import ffmpeg
 from tqdm import tqdm
 from typing import Dict, Any
 
-# Dynamic path handling
-import os
-import sys
-
-# Add parent directory to path for package imports
-project_root = os.path.dirname(os.path.abspath(__file__))
-if project_root not in sys.path:
-    sys.path.insert(0, project_root)
-    
-current_dir = os.path.dirname(os.path.abspath(__file__))
-parent_dir = os.path.dirname(current_dir)
-if parent_dir not in sys.path:
-    sys.path.append(parent_dir)
 
 # Now the imports should work
 from conclave.core.engine import ConclaveEngine
@@ -194,6 +181,8 @@ class ConclaveOrchestrator:
                         self.engine.add_memories_m3_style(semantic)
 
                 if clip_id % 2 == 0: 
+                    # CRITICAL FIX: Ensure async writes are committed before reading
+                    self.engine.graph_store.flush()
                     self.identity_manager.link_modalities(self.video_id)
                 
                 # Optimized Cleanup: Only clear cache if VRAM is actually tight

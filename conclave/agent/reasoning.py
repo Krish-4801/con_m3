@@ -150,7 +150,7 @@ class ReasoningAgent:
                     {"role": "user", "content": f"Perception Data:\n{context_str}"}
                 ],
                 response_format={"type": "json_object"},
-                temperature=0.2 # Low temperature for consistent tagging
+                temperature=1.0 # Gemini-3-flash-preview requires 1.0 or default
             )
             
             raw_json = response.choices[0].message.content
