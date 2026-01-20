@@ -185,11 +185,8 @@ class IdentityManager:
         logger.warning(f"🔄 DEEP MERGE INITIATED: Unifying {target_id} into {source_id}")
 
         # 1. Graph Refactor (Neo4j) - Move all relationships
-        def merge_identities(self, source_id: str, target_id: str, video_id: str):
-        """
-        Step 3: Safe Merge (The "Deep Refactor").
-        Uses Async Graph Writes to prevent blocking the perception loop.
-        """
+    def merge_identities(self, source_id: str, target_id: str, video_id: str):
+     
         if source_id == target_id:
             return
 

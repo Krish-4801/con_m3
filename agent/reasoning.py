@@ -1,7 +1,7 @@
 import json
 import logging
 import re
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Tuple
 import openai
 
 from conclave.core.schemas import (
@@ -11,140 +11,92 @@ from conclave.core.schemas import (
     MemoryNode,
     MemoryType,
 )
+from conclave.prompts.reasoning import M3_SYSTEM_PROMPT
 
 logger = logging.getLogger("Conclave.ReasoningAgent")
 
-
 class ReasoningAgent:
     """
-    State-of-the-art reasoning engine with:
-    - Strict JSON enforcement
-    - Automatic repair & retry loop
-    - Knowledge Graph–safe outputs
+    M3-Agent Logic Implementation:
+    Generates 'Episodic' descriptions and 'Semantic' equivalences.
+    Strictly enforces <face_uuid> and <voice_uuid> tagging to enable Graph resolution.
     """
 
     def __init__(self, config: Dict[str, Any]):
+        # Support various config structures (api section vs root)
+        self.model = config.get("model", "gemini-1.5-flash") # Fallback to a valid default
         
-        api_key = config.get("openai_api_key") or config.get("api_key")
-        self.client = openai.OpenAI(api_key=api_key)
-        self.model = config.get("model", "gpt-5-mini")
-        self.max_retries = config.get("max_retries", 3)
+        # Handle API Key extraction
+        api_key = config.get("openai_api_key") or config.get("api_key") or config.get("gemini_api_key")
+        base_url = config.get("base_url") or config.get("gemini_base_url")
 
-        # Matches <ent_uuid> or raw UUIDs
-        self.entity_pattern = re.compile(r"<(ent_[a-zA-Z0-9_]+|[a-f0-9\-]{36})>")
-
-    # ------------------------------------------------------------------
-    # JSON SAFETY
-    # ------------------------------------------------------------------
-
-    def _clean_json_string(self, raw: str) -> str:
-        """Removes markdown wrappers and common LLM formatting mistakes."""
-        cleaned = raw.strip()
-
-        if cleaned.startswith("```"):
-            cleaned = re.sub(r"```[a-zA-Z]*\n?", "", cleaned)
-            cleaned = cleaned.rstrip("```")
-
-        return cleaned.strip()
-
-    def _safe_json_load(self, raw: str) -> Any:
-        cleaned = self._clean_json_string(raw)
-        return json.loads(cleaned)
-
-    def _llm_json_call(
-        self,
-        system_prompt: str,
-        user_prompt: str,
-        required_key: str,
-    ) -> Any:
-        """
-        Executes a strict JSON call with validation + repair loop.
-        Forces object output and extracts required_key.
-        """
-
-        for attempt in range(1, self.max_retries + 1):
-            try:
-                response = self.client.chat.completions.create(
-                    model=self.model,
-                    messages=[
-                        {
-                            "role": "system",
-                            "content": system_prompt
-                            + "\nOUTPUT ONLY VALID JSON. NO MARKDOWN.",
-                        },
-                        {"role": "user", "content": user_prompt},
-                    ],
-                    response_format={"type": "json_object"},
-                )
-
-                raw = response.choices[0].message.content
-                parsed = self._safe_json_load(raw)
-
-                if required_key not in parsed:
-                    raise KeyError(f"Missing key '{required_key}'")
-
-                return parsed[required_key]
-
-            except Exception as e:
-                logger.warning(
-                    f"JSON attempt {attempt}/{self.max_retries} failed: {e}"
-                )
-
-        logger.error("All JSON repair attempts failed")
-        return []
+        if "gemini" in self.model.lower():
+            # Ensure we have the Gemini endpoint if using a Gemini model
+            if not base_url and "googleapis" not in (base_url or ""):
+                base_url = "https://generativelanguage.googleapis.com/v1beta/openai/"
+            
+            self.client = openai.OpenAI(api_key=api_key, base_url=base_url)
+        else:
+            self.client = openai.OpenAI(api_key=api_key)
 
     # ------------------------------------------------------------------
-    # MULTIMODAL CONTEXT
+    # CONTEXT PREPARATION (M3 Style)
     # ------------------------------------------------------------------
 
-    def _prepare_multimodal_context(
+    def _prepare_m3_context(
         self,
         visuals: List[VisualObservation],
         faces: List[FaceObservation],
         voices: List[VoiceObservation],
     ) -> str:
         """
-        Converts raw perception into LLM-readable structured context.
+        Formats raw perceptions into a "Screenplay" format for the LLM.
         """
+        context_blocks = []
 
-        blocks: List[str] = []
-
-        # Visuals
+        # 1. Visual Context
+        descriptions = []
+        ocr_texts = []
         for v in visuals:
-            spatial = getattr(v, "spatial_metadata", {}) or {}
-            desc = spatial.get("dense_description", "No description")
-            ocr = ", ".join(t["text"] for t in v.ocr_tokens) if v.ocr_tokens else ""
-            blocks.append(
-                f"[{v.ts_ms}ms] Visual: {desc}. Text: [{ocr}]"
-            )
+            spatial = getattr(v, "spatial_metadata", {})
+            desc = spatial.get("dense_description")
+            if desc: descriptions.append(desc)
+            if v.ocr_tokens:
+                ocr_texts.extend([t["text"] for t in v.ocr_tokens])
+        
+        unique_desc = list(set(descriptions))
+        scene_summary = " ".join(unique_desc[:3]) 
+        unique_ocr = ", ".join(list(set(ocr_texts)))
 
-        # Aggregate by entity
-        entity_events: Dict[str, List[str]] = {}
+        context_blocks.append(f"### Visual Scene Summary:\n{scene_summary}")
+        if unique_ocr:
+            context_blocks.append(f"### Visible Text/Slides:\n{unique_ocr}")
 
-        for f in faces:
-            if f.entity_id:
-                entity_events.setdefault(f.entity_id, []).append(
-                    f"Face seen at {f.ts_ms}ms"
-                )
+        # 2. Face Context
+        context_blocks.append("Face features:")
+        if faces:
+            unique_faces = sorted(list(set([f.entity_id for f in faces if f.entity_id])))
+            for f_id in unique_faces:
+                 context_blocks.append(f"<{f_id}> detected.")
+        else:
+            context_blocks.append("No faces detected.")
 
-        for v in voices:
-            if v.entity_id:
-                entity_events.setdefault(v.entity_id, []).append(
-                    f"Spoke at {v.ts_ms}ms: '{v.asr_text}'"
-                )
+        # 3. Voice Context
+        context_blocks.append("Voice features:")
+        if voices:
+            for v in voices:
+                if v.entity_id and len(v.asr_text) > 2: 
+                    context_blocks.append(f"<{v.entity_id}>: {v.asr_text}")
+        else:
+            context_blocks.append("No voices detected.")
 
-        for eid, events in entity_events.items():
-            blocks.append(
-                f"[Entity: <{eid}>] " + " | ".join(events)
-            )
-
-        return "\n".join(blocks)
+        return "\n\n".join(context_blocks)
 
     # ------------------------------------------------------------------
-    # EPISODIC MEMORY
+    # REASONING CORE (The Missing Method!)
     # ------------------------------------------------------------------
 
-    def generate_episodic_memory(
+    def generate_memory_structures(
         self,
         video_id: str,
         clip_id: int,
@@ -152,105 +104,61 @@ class ReasoningAgent:
         faces: List[FaceObservation],
         voices: List[VoiceObservation],
     ) -> List[MemoryNode]:
+        """
+        Generates BOTH Episodic (Event) and Semantic (Equivalence) memories in one pass.
+        """
+        
+        # 1. Build Context
+        context_str = self._prepare_m3_context(visuals, faces, voices)
+        
+        # 2. M3 System Prompt
+        system_prompt = M3_SYSTEM_PROMPT
 
-        context = self._prepare_multimodal_context(
-            visuals, faces, voices
-        )
+        try:
+            # 3. LLM Call
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": f"Perception Data:\n{context_str}"}
+                ],
+                response_format={"type": "json_object"},
+                temperature=1.0 # High temp for Gemini creativity
+            )
+            
+            raw_json = response.choices[0].message.content
+            parsed = json.loads(raw_json)
+            
+            memories = []
 
-        system_prompt = """
-You are the Conclave Multimodal Reasoning Engine.
 
-RULES:
-1. Output JSON only.
-2. Return {"memories": [string, ...]}
-3. Be factual and concise.
-4. Use EXACT entity tags like <ent_uuid>.
-5. Do not invent entities.
-"""
-
-        user_prompt = f"""
-Video ID: {video_id}
-Clip ID: {clip_id}
-
-Perception Data:
-{context}
-
-Generate episodic memories.
-"""
-
-        memories = self._llm_json_call(
-            system_prompt=system_prompt,
-            user_prompt=user_prompt,
-            required_key="memories",
-        )
-
-        nodes: List[MemoryNode] = []
-
-        for text in memories:
-            mentions = list(set(self.entity_pattern.findall(text)))
-
-            nodes.append(
-                MemoryNode(
+            # 4. Process Episodic
+            for text in parsed.get("episodic_memory", []):
+                memories.append(MemoryNode(
                     video_id=video_id,
                     clip_id=clip_id,
                     content=text,
                     mem_type=MemoryType.EPISODIC,
-                    linked_entities=mentions,
-                )
-            )
+                    linked_entities=self._extract_tags(text)
+                ))
 
-        return nodes
-
-    # ------------------------------------------------------------------
-    # SEMANTIC DISTILLATION
-    # ------------------------------------------------------------------
-
-    def distillation_pass(
-        self,
-        video_id: str,
-        episodic_nodes: List[MemoryNode],
-        existing_semantic_context: str,
-    ) -> List[MemoryNode]:
-
-        episodes = "\n".join(n.content for n in episodic_nodes)
-
-        system_prompt = """
-You are a knowledge distillation engine.
-
-RULES:
-1. Output JSON only.
-2. Return {"facts": [string, ...]}
-3. Extract long-term, reusable knowledge.
-4. Use entity tags <ent_uuid>.
-"""
-
-        user_prompt = f"""
-Existing Knowledge:
-{existing_semantic_context}
-
-New Events:
-{episodes}
-
-Extract semantic facts.
-"""
-
-        facts = self._llm_json_call(
-            system_prompt=system_prompt,
-            user_prompt=user_prompt,
-            required_key="facts",
-        )
-
-        semantic_nodes: List[MemoryNode] = []
-
-        for fact in facts:
-            mentions = list(set(self.entity_pattern.findall(fact)))
-            semantic_nodes.append(
-                MemoryNode(
+            # 5. Process Semantic (includes Equivalences in this prompt)
+            for text in parsed.get("semantic_memory", []):
+                memories.append(MemoryNode(
                     video_id=video_id,
-                    content=fact,
+                    clip_id=clip_id,
+                    content=text,
                     mem_type=MemoryType.SEMANTIC,
-                    linked_entities=mentions,
-                )
-            )
+                    linked_entities=self._extract_tags(text)
+                ))
 
-        return semantic_nodes
+            return memories
+
+        except Exception as e:
+            logger.error(f"Reasoning Error: {e}")
+            return []
+
+    def _extract_tags(self, text: str) -> List[str]:
+        """Regex to pull <face_...> and <voice_...> tags for graph linking."""
+        pattern = r'<((?:ent_)?(?:face|voice)_[a-zA-Z0-9\-]+)>'
+        return list(set(re.findall(pattern, text)))
