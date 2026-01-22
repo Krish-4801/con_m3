@@ -24,7 +24,7 @@ class SceneProcessor:
         gemini_conf = config.get("gemini", {})
         api_key = gemini_conf.get("api_key")
         base_url = gemini_conf.get("base_url")
-        model = gemini_conf.get("model", "gemini-2.5-flash-lite")
+        model = gemini_conf.get("model", "gemini-3-flash")
 
         self.client = None
         self.vlm_model_name = model
@@ -34,14 +34,14 @@ class SceneProcessor:
             self.client = openai.OpenAI(
                 base_url=base_url,
                 api_key=api_key,
-                timeout=10.0,
+                timeout=60.0,
                 max_retries=1
             )
         else:
             logger.warning("⚠️ Gemini API credentials missing. Captions will be skipped.")
         
         # Logic: Caption every 5th frame (Every ~5 seconds at 1FPS)
-        self.caption_interval = 5
+        self.caption_interval = 3
         
         logger.info(f"⚡ Loading Lightweight Stack (YOLO + SigLIP) on {self.device}...")
 
@@ -80,17 +80,14 @@ class SceneProcessor:
                     "role": "user", 
                     "content": [
                         # UPDATED PROMPT: Request action and interaction description
-                        {"type": "text", "text": '''Analyze this video frame in extreme detail.
-1. VISUAL INVENTORY: List visible objects. For each major object, describe its:
-               - Shape
-               - Color
-               - Material/Texture
-2. Describe their specific actions, gestures, and any interactions between them.
-Note any clearly visible text or significant environmental items.
-Your output must be a series of short, atomic sentences, one per line.
-Focus on the narrative context—what is happening in this scene?
-Keep descriptions dynamic and avoid static attributes like color or material unless relevant to the action.
-3. OCR DATA: Transcribe ALL visible text found in the image explicitly. If there is text, quote it.'''},
+                        {"type": "text", "text": '''Analyze this video frame.
+ACTIONS
+Write one short sentence per action.
+Describe who is doing what and to whom.
+Focus only on the main event.
+TEXT
+Write all visible text exactly, in quotes. look for licence plates or any texts that appear on a object, also write which object the text is written
+OUTPUT SHOULD BE SHORT AND CONSISE'''},
                         {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}
                     ]
                 }],

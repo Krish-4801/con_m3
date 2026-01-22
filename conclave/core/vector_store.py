@@ -1,3 +1,4 @@
+import logging
 from qdrant_client import QdrantClient
 from qdrant_client.http import models
 from typing import List, Dict, Any, Optional
@@ -15,7 +16,7 @@ class VectorStore:
         try:
             res = self.client.retrieve(collection_name=collection, ids=[point_id])
             return len(res) > 0
-        except:
+        except Exception:
             return False
 
     def upsert(self, collection: str, point_id: str, vector: List[float], payload: Dict[str, Any]):
@@ -37,6 +38,18 @@ class VectorStore:
             collection_name=collection,
             points=points
         )
+        
+    def delete(self, collection: str, point_ids: List[str]):
+        """
+        Physically removes vectors from the index.
+        Used by the Forgetting mechanism in Engine.
+        """
+        if not point_ids:
+            return
+        self.client.delete(
+            collection_name=collection,
+            points_selector=models.PointIdsList(points=point_ids)
+        )
 
     def search(self, collection: str, vector: List[float], filter_kv: Dict[str, Any], limit: int = 5):
         """
@@ -56,7 +69,7 @@ class VectorStore:
     def update_point_entity(self, collection: str, point_ids: List[str], new_entity_id: str):
         """
         Updates the entity_id payload field for a list of points.
-        Used during Identity Merge.
+        Used during IdentityMerge.
         """
         if not point_ids: return
         

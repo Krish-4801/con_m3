@@ -89,10 +89,16 @@ class GraphStore:
         self.write_queue.put((query, {"entity_id": entity_id, "type": entity_type, "video_id": video_id}))
 
     def create_memory_node(self, mem_id: str, content: str, mem_type: str, video_id: str, clip_id: int):
+        # UPDATED: Initialize last_accessed timestamp
         query = """
         MATCH (c:Clip {id: $clip_id, video_id: $video_id})
         MERGE (m:Memory {id: $mem_id})
-        ON CREATE SET m.content = $content, m.type = $mem_type, m.video_id = $video_id, m.weight = 1.0
+        ON CREATE SET 
+            m.content = $content, 
+            m.type = $mem_type, 
+            m.video_id = $video_id, 
+            m.weight = 1.0,
+            m.last_accessed = timestamp()
         MERGE (c)-[:HAS_MEMORY]->(m)
         """
         self.write_queue.put((query, {
@@ -101,11 +107,55 @@ class GraphStore:
         }))
 
     def reinforce_node(self, mem_id: str, delta: float = 1.0):
+        # UPDATED: Update last_accessed on reinforcement
         query = """
         MATCH (m:Memory {id: $mem_id})
-        SET m.weight = coalesce(m.weight, 1.0) + $delta
+        SET m.weight = coalesce(m.weight, 1.0) + $delta,
+            m.last_accessed = timestamp()
         """
         self.write_queue.put((query, {"mem_id": mem_id, "delta": delta}))
+
+    def prune_decayed_memories(self, video_id: str, decay_factor: float, threshold: float) -> List[str]:
+        """
+        Synchronous method to apply time-decay and delete weak memories.
+        Returns the list of deleted memory IDs to sync with VectorStore.
+        
+        Logic:
+        1. Calculate time passed since last access.
+        2. Apply decay: weight = weight * decay_factor
+        3. If weight < threshold, DELETE node and return ID.
+        """
+        # Note: We filter for 'semantic' usually, as episodic events shouldn't disappear,
+        # but the requirement says "Evolving representations", so we might decay older semantic abstractions.
+        query = """
+        MATCH (m:Memory {video_id: $video_id, type: 'semantic'})
+        WHERE m.last_accessed IS NOT NULL
+        
+        // Calculate hours since last access (timestamp is ms)
+        WITH m, (timestamp() - m.last_accessed) / 3600000.0 AS hours_passed
+        WHERE hours_passed > 1 // Only decay things older than an hour to avoid thrashing
+        
+        // Apply Decay
+        SET m.weight = m.weight * ($decay_factor)
+        
+        // Check Threshold
+        WITH m
+        WHERE m.weight < $threshold
+        
+        // Prune
+        DETACH DELETE m
+        RETURN m.id as id
+        """
+        
+        # We must run this synchronously to get the IDs back for Qdrant deletion
+        with self.driver.session() as session:
+            result = session.run(query, {
+                "video_id": video_id, 
+                "decay_factor": decay_factor, 
+                "threshold": threshold
+            }).data()
+            
+        return [r['id'] for r in result]
 
     def create_clip_structure(self, video_id: str, clip_id: int):
         query = """

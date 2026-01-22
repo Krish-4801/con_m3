@@ -46,6 +46,38 @@ class ConclaveEngine:
             "text": "text_memories"
         }
 
+    def apply_memory_decay(self, decay_factor: float = 0.95, prune_threshold: float = 0.1):
+        """
+        M3 Feature: Evolving Representations.
+        Applies time-based decay to semantic memories and deletes those that fall below a threshold.
+        This simulates 'forgetting' unused information.
+        
+        Args:
+            decay_factor: Multiplier for weight (e.g. 0.95 = 5% decay per run/hour).
+            prune_threshold: Weights below this are deleted.
+        """
+        logger.info(f"⏳ Running Memory Decay (Factor: {decay_factor}, Threshold: {prune_threshold})")
+        
+        # 1. Flush async writes to ensure graph is up to date
+        self.graph_store.flush()
+        
+        # 2. Execute Graph Logic (Pruning happens inside Neo4j)
+        # Returns IDs of nodes that were deleted from the graph
+        deleted_ids = self.graph_store.prune_decayed_memories(
+            self.video_id, 
+            decay_factor, 
+            prune_threshold
+        )
+        
+        if deleted_ids:
+            logger.info(f"🗑️ Forgetting {len(deleted_ids)} decayed memories...")
+            
+            # 3. Sync Delete from Qdrant
+            self.vector_store.delete(self.collections["text"], deleted_ids)
+            logger.info("✅ Cleanup Complete.")
+        else:
+            logger.info("✅ No memories decayed below threshold.")
+
     def ingest_face(self, obs: FaceObservation):
         """
         Aligned with main.py: Ensures temporal structure exists and 
