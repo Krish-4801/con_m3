@@ -93,7 +93,8 @@ Keep descriptions dynamic and avoid static attributes like color or material unl
 3. OCR DATA: Transcribe ALL visible text found in the image explicitly. If there is text, quote it.'''},
                         {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}
                     ]
-                }]
+                }],
+                max_tokens=2000,
             )
             if resp.choices:
                 content = resp.choices[0].message.content

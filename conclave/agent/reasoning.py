@@ -15,11 +15,6 @@ from conclave.core.schemas import (
 logger = logging.getLogger("Conclave.ReasoningAgent")
 
 class ReasoningAgent:
-    """
-    M3-Agent Logic Implementation:
-    Generates 'Episodic' descriptions and 'Semantic' equivalences.
-    Strictly enforces <face_uuid> and <voice_uuid> tagging to enable Graph resolution.
-    """
 
     def __init__(self, config: Dict[str, Any]):
         self.model = config.get("model", "gemini-3-flash-preview")
@@ -34,7 +29,7 @@ class ReasoningAgent:
         self.max_retries = 3
 
     # ------------------------------------------------------------------
-    # CONTEXT PREPARATION (M3 Style)
+    # CONTEXT PREPARATION
     # ------------------------------------------------------------------
 
     def _prepare_m3_context(
@@ -108,10 +103,9 @@ class ReasoningAgent:
         # 1. Build Context
         context_str = self._prepare_m3_context(visuals, faces, voices)
         
-        # 2. M3 System Prompt
         # Updated to explicitly forbid "was visible" logging style.
         system_prompt = """
-        You are the M3-Agent Multimodal Reasoning Engine.
+        You are a Multimodal Reasoning Engine.
         Your goal is to synthesize distinct perceptions (Visual Scene, Faces, Audio) into a cohesive narrative.
 
         INPUT DATA:
