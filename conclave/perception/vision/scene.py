@@ -24,7 +24,7 @@ class SceneProcessor:
         gemini_conf = config.get("gemini", {})
         api_key = gemini_conf.get("api_key")
         base_url = gemini_conf.get("base_url")
-        model = gemini_conf.get("model", "gemini-3-flash-preview")
+        model = gemini_conf.get("model", "gemini-2.5-flash-lite")
 
         self.client = None
         self.vlm_model_name = model

@@ -1,10 +1,12 @@
 import os
+
 import json
 import logging
 import argparse
 import re
 import ast
 import time
+
 from typing import List, Dict, Any, Tuple
 import openai
 
@@ -165,6 +167,10 @@ Input:
 Output:"""
 
 
+
+
+
+
 class M3Controller:
     def __init__(self, config_path: str, video_id: str):
         if not os.path.exists(config_path):
@@ -172,9 +178,9 @@ class M3Controller:
 
         with open(config_path, "r") as f:
             self.config = json.load(f)
-        
+
         self.video_id = video_id
-        
+
         # Engine & Identity
         self.engine = ConclaveEngine(video_id=video_id, config_path=config_path)
         self.identity_manager = IdentityManager(
@@ -182,6 +188,8 @@ class M3Controller:
             self.engine.graph_store, 
             self.engine.api_config
         )
+
+
         self.embedder = self.engine.embedding_service
 
         # LLM Setup
@@ -192,6 +200,14 @@ class M3Controller:
         )
 
         # Build Character Mappings
+
+
+
+
+
+
+
+
         logger.info("🔄 Building Identity Mappings...")
         self.identity_manager.refresh_equivalences(self.video_id)
 
@@ -226,8 +242,9 @@ class M3Controller:
                     to_be_translated.extend(new_variations)
             
             translated_queries.extend(to_be_translated)
-        
+
         return list(set(translated_queries))
+
 
     def retrieve(self, queries: List[str], current_clips: List[int], top_k: int = 5) -> Tuple[Dict[str, List[str]], List[int]]:
         """
@@ -236,13 +253,14 @@ class M3Controller:
         """
         # 1. Back Translate
         expanded_queries = self.back_translate(queries)
-        
+
         # 2. Get Embeddings
         query_vecs = self.embedder.get_embeddings_batched(expanded_queries)
-        
+
         # 3. Vector Search & Aggregate Scores
+
         clip_scores: Dict[int, List[float]] = {}
-        
+
         for vec in query_vecs:
             # Search against text memories
             hits = self.engine.vector_store.search(
@@ -251,42 +269,52 @@ class M3Controller:
                 filter_kv={"video_id": self.video_id},
                 limit=20 
             )
+
             for hit in hits:
                 c_id = hit.payload.get("clip_id")
+
                 if c_id is not None:
                     if c_id not in clip_scores: clip_scores[c_id] = []
                     clip_scores[c_id].append(hit.score)
 
         # Max Score Aggregation (Standard M3)
         final_clip_scores = {cid: max(scores) for cid, scores in clip_scores.items()}
-        
+
         # Filter existing clips
         sorted_clips = sorted(final_clip_scores.items(), key=lambda x: x[1], reverse=True)
+
+
         new_top_clips = []
         for cid, _ in sorted_clips:
             if cid not in current_clips:
                 new_top_clips.append(cid)
             if len(new_top_clips) >= top_k:
                 break
-        
+
         # 4. Retrieve & Translate Content
         new_memories = {}
+
         for cid in new_top_clips:
             # Cypher to get all text for this clip
+
             cypher = """
             MATCH (c:Clip {id: $clip_id, video_id: $video_id})-[:HAS_MEMORY]->(m:Memory)
             RETURN m.content as content
             """
             results = self.engine.graph_store.run_query(cypher, {"clip_id": cid, "video_id": self.video_id})
-            
+
+
+
+
             raw_texts = [r['content'] for r in results]
-            
+
             # Forward Translate: <face_1> -> <character_0> (for LLM readability)
+
             translated_texts = [self.identity_manager.translate_content(t) for t in raw_texts]
-            
+
             new_memories[f"CLIP_{cid}"] = translated_texts
             current_clips.append(cid)
-            
+
         return new_memories, current_clips
 
     # ------------------------------------------------------------------
@@ -315,7 +343,7 @@ class M3Controller:
     # 3. CONTROL LOOP (M3 State Machine)
     # ------------------------------------------------------------------
 
-    def run(self, question: str, max_steps: int = 5, multiple_queries: bool = False):
+    def run(self, question: str, max_steps: int = 5, multiple_queries: bool = False, show_retrieved: bool = False):
         """
         Executes the M3 Control Loop:
         Plan -> Reasoning -> Action -> Search -> Strategy Switch -> Final Answer.
@@ -323,6 +351,46 @@ class M3Controller:
         # 1. Generate Plan
         retrieval_plan = self.generate_plan(question)
         logger.info(f"📝 Plan: {retrieval_plan}")
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
         context = []  # Stores reasoning/query history
         current_clips = []
@@ -342,6 +410,10 @@ class M3Controller:
                 # M3 uses prompt_generate_action_with_plan_new_direction
                 prompt_template = PROMPT_ACTION_NEW_DIRECTION
 
+
+
+
+
             formatted_prompt = prompt_template.format(
                 question=question,
                 retrieval_plan=retrieval_plan,
@@ -349,7 +421,7 @@ class M3Controller:
             )
 
             messages = [{"role": "user", "content": formatted_prompt}]
-            
+
             # 3. LLM Action Decision
             response_text = self._call_llm(messages)
             logger.info(f"🤖 Agent: {response_text[:200]}...")
@@ -369,13 +441,15 @@ class M3Controller:
                 reasoning = parts[0].strip()
                 action_type = "search"
                 raw_content = parts[1].strip()
-                
+
                 # Parse search content (List or String)
                 try:
                     # Try parsing as python list if multiple queries
                     parsed_list = ast.literal_eval(raw_content)
                     if isinstance(parsed_list, list):
                         action_content = parsed_list
+
+
                     else:
                         action_content = [raw_content]
                 except:
@@ -391,13 +465,25 @@ class M3Controller:
                 # Perform Search
                 new_mems, updated_clips = self.retrieve(action_content, current_clips)
                 current_clips = updated_clips
-                
+
                 # Check for Strategy Switch (Empty result)
                 if not new_mems:
                     logger.warning("⚠️ No new memories found. Switching strategy for next round.")
                     switch_strategy = True
                 else:
                     switch_strategy = False # Reset if we found something
+
+                # Optionally display what was retrieved
+                if show_retrieved and new_mems:
+                    print("\n🔍 Retrieved memories:")
+                    for clip_key in sorted(new_mems.keys()):
+                        print(f"- {clip_key}:")
+                        texts = new_mems[clip_key]
+                        for i, t in enumerate(texts[:10], start=1):
+                            # Truncate long texts for readability
+                            snippet = t if len(t) <= 500 else t[:500] + '...'
+                            print(f"    {i}. {snippet}")
+                    print()
 
                 # Update Context
                 context.append({
@@ -424,7 +510,8 @@ if __name__ == "__main__":
     parser.add_argument("--video_id", type=str, required=True)
     parser.add_argument("--config", type=str, default="configs/api_config.json")
     parser.add_argument("--multi", action="store_true", help="Enable multiple queries per step")
+    parser.add_argument("--show_retrieved", action="store_true", help="Print retrieved memories during search")
     args = parser.parse_args()
 
     agent = M3Controller(args.config, args.video_id)
-    agent.run(args.query, multiple_queries=args.multi)
+    agent.run(args.query, multiple_queries=args.multi, show_retrieved=args.show_retrieved)
